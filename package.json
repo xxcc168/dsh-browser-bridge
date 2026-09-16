@@ -1,0 +1,68 @@
+{
+  "name": "dsh-browser-bridge",
+  "version": "1.4.1",
+  "private": true,
+  "description": "本机 Chrome 桥接：扩展、HTTP/WebSocket 服务、MCP、DSH 与 CLI 的统一项目",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "bridge",
+    "extension",
+    "examples",
+    "docs",
+    "scripts",
+    "tests",
+    "selfcheck.mjs",
+    "lib",
+    "tools.manifest.json"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node bridge/bridge.js",
+    "mcp": "node examples/mcp-server.mjs",
+    "cli": "node examples/cli.mjs",
+    "check": "node scripts/check.mjs && node selfcheck.mjs",
+    "test": "node --test tests/behavior.test.mjs tests/control.test.mjs tests/extension-control.test.mjs tests/transport.test.mjs",
+    "icons": "node scripts/make-icons.cjs"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "cordis",
+    "plugin",
+    "browser",
+    "chrome",
+    "automation",
+    "mcp"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "plugin": {
+      "row": {
+        "id": "browser-bridge",
+        "name": "dsh-browser-bridge",
+        "config": {
+          "bridgeDir": "",
+          "port": 8765,
+          "autoStart": true,
+          "searchEngine": "bing",
+          "searchMaxResults": 8
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.18.0",
+    "zod": "^4.6.1"
+  }
+}

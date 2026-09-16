@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dsh_browser_bridge": {
+      "command": "node",
+      "args": ["D:\\tools\\dsh-browser-bridge\\examples\\mcp-server.mjs"],
+      "env": {
+        "DSH_BRIDGE_AUTOSTART": "true"
+      }
+    }
+  }
+}

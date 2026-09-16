@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>DSH Browser Bridge</title>
+  </head>
+  <body>
+    <h1>DSH Browser Bridge</h1>
+    <div class="status-row">
+      <span id="dot" class="dot"></span>
+      <span id="status-text">检查中…</span>
+    </div>
+    <label class="field">
+      桥接服务地址
+      <input id="ws-url" type="text" placeholder="ws://127.0.0.1:8765/ws" />
+    </label>
+    <div class="buttons">
+      <button id="btn-save">保存并重连</button>
+      <button id="btn-refresh">刷新状态</button>
+    </div>
+    <div class="section-title">当前标签页（点击切换）</div>
+    <ul id="tab-list"></ul>
+    <div id="msg" class="msg"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

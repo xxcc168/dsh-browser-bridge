@@ -1,0 +1,114 @@
+body {
+  width: 390px;
+  margin: 0;
+  padding: 12px 14px;
+  font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  color: #1f2937;
+  background: #ffffff;
+}
+h1 {
+  font-size: 15px;
+  margin: 0 0 10px;
+}
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9ca3af;
+  flex: none;
+}
+.dot.on {
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+}
+.dot.off {
+  background: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+}
+.field {
+  display: block;
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+.field input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+.buttons {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.buttons button {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #f9fafb;
+  cursor: pointer;
+}
+.buttons button:hover {
+  background: #f3f4f6;
+}
+.section-title {
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+#tab-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid #f3f4f6;
+  border-radius: 6px;
+}
+#tab-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #f3f4f6;
+}
+#tab-list li:last-child {
+  border-bottom: none;
+}
+#tab-list a {
+  color: #1d4ed8;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tabid {
+  color: #9ca3af;
+  font-size: 11px;
+  flex: none;
+}
+.msg {
+  margin-top: 10px;
+  color: #9ca3af;
+  font-size: 11px;
+}
+.tab-details { min-width:0; flex:1; }
+.tab-details a { display:block; }
+.control-status { color:#166534; font-size:11px; margin-top:3px; }
+.control-button { flex:none; border:1px solid #fca5a5; background:#fff1f2; color:#991b1b; border-radius:5px; padding:4px 6px; cursor:pointer; }
+.control-button:disabled { opacity:.55; cursor:default; }

@@ -1,0 +1,1301 @@
+{
+  "schemaVersion": 2,
+  "package": "dsh-browser-bridge",
+  "version": "1.4.1",
+  "description": "统一工具 schema；所有适配器从本文件注册。bridge 协议 2 支持 deadline、请求记录、租约和批量步骤。",
+  "transport": {
+    "type": "http",
+    "defaultPort": 8765,
+    "protocolVersion": 3,
+    "auth": "DSH_BRIDGE_TOKEN -> Authorization: Bearer",
+    "requestHeaders": [
+      "X-DSH-Request-Id",
+      "X-DSH-Deadline",
+      "X-DSH-Session",
+      "X-DSH-Owner",
+      "X-DSH-Agent-Name"
+    ]
+  },
+  "constraints": [
+    "页面首次操作原子获取任务级独占控制，其他 owner 立即拒绝，不进入队列。",
+    "MCP/CLI 必须提供稳定任务 agentId 或宿主身份；DSH 使用 exec.agent。sessionId 不能替代 owner。",
+    "60 秒租约，20 秒客户端续租；无执行中操作且 120 秒无页面活动后回收。连接心跳不重置空闲期限。",
+    "手动停止撤销旧控制代次，旧任务被阻止自动重占；未知执行状态须等扩展确认结束。",
+    "所有动作含 eval 都遵守占用；batch 不回滚已执行动作。"
+  ],
+  "tools": [
+    {
+      "name": "browser_status",
+      "title": "查看服务、扩展和心跳状态",
+      "description": "查看服务、扩展和心跳状态",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "action": null,
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_tabs",
+      "title": "列出标签页",
+      "description": "列出标签页；默认不返回图标",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "activeOnly": {
+            "type": "boolean",
+            "description": "只列活动标签页"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "action": null,
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_open",
+      "title": "打开标签页",
+      "description": "打开标签页；默认后台打开",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "完整 URL"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "激活新标签页，默认 false"
+          },
+          "windowId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "目标窗口"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "action": "open",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_navigate",
+      "title": "请求页面跳转",
+      "description": "请求页面跳转；用 wait 确认就绪",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "url": {
+            "type": "string",
+            "description": "目标 URL"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "action": "navigate",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_activate",
+      "title": "激活标签页并聚焦窗口",
+      "description": "激活标签页并聚焦窗口",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": "activate",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_close",
+      "title": "关闭指定标签页",
+      "description": "关闭指定标签页",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": "close",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_read",
+      "title": "读取正文",
+      "description": "读取正文；默认 8000 字符，支持续读",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "maxText": {
+            "type": "integer",
+            "minimum": 256,
+            "maximum": 120000,
+            "description": "正文字符预算，默认 8000"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000000,
+            "description": "起始偏移"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": "readPage",
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_extract",
+      "title": "提取元素状态与定位信息",
+      "description": "提取元素状态与定位信息；总预算和分页",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000000,
+            "description": "起始偏移"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "元素条数"
+          },
+          "max": {
+            "type": "integer",
+            "minimum": 256,
+            "maximum": 50000,
+            "description": "返回字段总字符预算，默认 8000"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "action": "extract",
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_click",
+      "title": "单次点击",
+      "description": "单次点击；默认要求唯一可见匹配",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "text": {
+            "type": "string",
+            "description": "精确可见文本"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000,
+            "description": "显式选择第几个匹配"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": "click",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_type",
+      "title": "填写输入框",
+      "description": "填写输入框；返回验证结果而不回显全文",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "text": {
+            "type": "string",
+            "description": "输入文字"
+          },
+          "clear": {
+            "type": "boolean",
+            "description": "默认覆盖"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "action": "type",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_key",
+      "title": "合成按键事件",
+      "description": "合成按键事件；不保证浏览器默认快捷键",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "key": {
+            "type": "string",
+            "description": "按键名称"
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "修饰键"
+            },
+            "maxItems": 4
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "key"
+        ],
+        "additionalProperties": false
+      },
+      "action": "key",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_wait",
+      "title": "等待元素状态",
+      "description": "等待元素状态；超时是错误，不滚动页面",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "attached",
+              "visible",
+              "enabled",
+              "hidden",
+              "detached"
+            ],
+            "description": "等待状态"
+          },
+          "contains": {
+            "type": "string",
+            "description": "等待文本包含"
+          },
+          "timeout": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000,
+            "description": "超时毫秒，默认 10000"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "action": "wait",
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_eval",
+      "title": "执行页面 JS 表达式（等待 Promise）",
+      "description": "执行页面 JS 表达式（等待 Promise）；受 CSP 限制，按写操作串行",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "expression": {
+            "type": "string",
+            "description": "JS 表达式；函数须显式调用"
+          },
+          "max": {
+            "type": "integer",
+            "minimum": 256,
+            "maximum": 50000,
+            "description": "结果字符上限，默认 8000"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "expression"
+        ],
+        "additionalProperties": false
+      },
+      "action": "evaluate",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_screenshot",
+      "title": "截取可见窗口",
+      "description": "截取可见窗口；会激活标签页；MCP 返回图片",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": "screenshot",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_search",
+      "title": "浏览器搜索",
+      "description": "浏览器搜索；失败保留页面和 tabId",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "关键词"
+          },
+          "engine": {
+            "type": "string",
+            "enum": [
+              "bing",
+              "baidu",
+              "google"
+            ],
+            "description": "默认 bing"
+          },
+          "maxResults": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": "默认 8"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "action": null,
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_scroll",
+      "title": "滚动页面或指定容器",
+      "description": "滚动页面或指定容器",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "dx": {
+            "type": "number"
+          },
+          "dy": {
+            "type": "number"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": "scroll",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_check",
+      "title": "幂等设置复选框或单选框状态",
+      "description": "幂等设置复选框或单选框状态",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "checked": {
+            "type": "boolean",
+            "description": "目标状态"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector",
+          "checked"
+        ],
+        "additionalProperties": false
+      },
+      "action": "check",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_select",
+      "title": "精确选择原生下拉选项",
+      "description": "精确选择原生下拉选项",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "value": {
+            "type": "string",
+            "description": "选项 value"
+          },
+          "label": {
+            "type": "string",
+            "description": "选项文本"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000,
+            "description": "选项索引"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "action": "select",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_hover",
+      "title": "向元素发送合成悬停事件",
+      "description": "向元素发送合成悬停事件",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "frameId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "frame id；默认主 frame"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "selector": {
+            "type": "string",
+            "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "action": "hover",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_frames",
+      "title": "列出可注入 frame 与 documentId",
+      "description": "列出可注入 frame 与 documentId",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": "frames",
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_batch",
+      "title": "连续执行最多 20 步",
+      "description": "连续执行最多 20 步；失败即停止并返回已完成步骤",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "可选幂等请求 id；结果未知时用 request_status 查询，不要换 id 重试"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "click",
+                    "type",
+                    "key",
+                    "scroll",
+                    "check",
+                    "select",
+                    "hover",
+                    "wait",
+                    "readPage",
+                    "extract",
+                    "navigate"
+                  ],
+                  "description": "步骤动作"
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "CSS（支持 >>> 穿透 open shadow）、text=文本、label=标签、placeholder=提示、role=button[name=\"名称\"]"
+                },
+                "text": {
+                  "type": "string",
+                  "description": "输入文字或点击文本"
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10000,
+                  "description": "明确指定匹配项"
+                },
+                "clear": {
+                  "type": "boolean",
+                  "description": "输入前清空"
+                },
+                "checked": {
+                  "type": "boolean",
+                  "description": "目标勾选状态"
+                },
+                "value": {
+                  "type": "string",
+                  "description": "选项 value"
+                },
+                "label": {
+                  "type": "string",
+                  "description": "选项精确文本"
+                },
+                "key": {
+                  "type": "string",
+                  "description": "按键"
+                },
+                "modifiers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "description": "修饰键"
+                  },
+                  "maxItems": 4
+                },
+                "dx": {
+                  "type": "number"
+                },
+                "dy": {
+                  "type": "number"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "目标 URL"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "attached",
+                    "visible",
+                    "enabled",
+                    "hidden",
+                    "detached"
+                  ],
+                  "description": "等待状态"
+                },
+                "contains": {
+                  "type": "string",
+                  "description": "等待文本包含"
+                },
+                "timeout": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 30000,
+                  "description": "步骤等待毫秒"
+                },
+                "maxText": {
+                  "type": "integer",
+                  "minimum": 256,
+                  "maximum": 50000,
+                  "description": "正文预算"
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10000000,
+                  "description": "起始偏移"
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100,
+                  "description": "元素条数"
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 256,
+                  "maximum": 50000,
+                  "description": "返回字段总字符预算，默认 8000"
+                },
+                "frameId": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647,
+                  "description": "frame id；默认主 frame"
+                },
+                "expectedUrl": {
+                  "type": "string",
+                  "description": "执行前校验当前 URL"
+                },
+                "documentId": {
+                  "type": "string",
+                  "description": "执行前校验 documentId"
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 20
+          },
+          "timeout": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000,
+            "description": "总时限，含排队，默认 60000"
+          },
+          "maxOutput": {
+            "type": "integer",
+            "minimum": 4096,
+            "maximum": 50000,
+            "description": "批量返回总预算，默认 16000 字符；超限步骤标记 omitted"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId",
+          "steps"
+        ],
+        "additionalProperties": false
+      },
+      "action": "batch",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_request_status",
+      "title": "查询命令状态与结果",
+      "description": "查询命令状态与结果；不重放请求",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "description": "原调用返回的 requestId"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "requestId"
+        ],
+        "additionalProperties": false
+      },
+      "action": null,
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_session",
+      "title": "获取、续期或释放标签页租约",
+      "description": "申请、续期或释放当前任务的独占控制；默认自动申请，空闲自动回收",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "acquire",
+              "renew",
+              "release"
+            ],
+            "description": "操作"
+          },
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "action": null,
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    }
+  ]
+}
