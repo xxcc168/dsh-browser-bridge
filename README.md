@@ -1,6 +1,6 @@
-# dsh-browser-bridge 1.4.1
+# dsh-browser-bridge 1.5.0
 
-统一维护 Chrome 扩展、本机 HTTP/WebSocket 服务和 MCP、DSH、CLI 入口。三个入口共用 lib/runtime.js，并从 tools.manifest.json 注册 23 个工具。
+统一维护 Chrome 扩展、本机 HTTP/WebSocket 服务和 MCP、DSH、CLI 入口。三个入口共用 lib/runtime.js，并从 tools.manifest.json 注册 25 个工具。
 
 ## 目录与启动
 
@@ -25,7 +25,7 @@ dsh-browser-bridge/
 
 ## 版本与升级
 
-- 适配器 1.4.1；bridge 1.3.0；扩展 1.2.0；协议版本 3。组件版本独立，兼容性由协议版本判断。
+- 适配器、bridge 和扩展版本均为 1.5.0；协议版本 3，能力标识为 `atomic-session-v1`。运行时仍会分别报告实际加载版本。
 - 需要 Node 22+、Chrome 120+；继续使用现有依赖，不需要新增软件包。
 - 旧工具名称保留；默认读取预算、后台打开与严格点击定位发生变化。
 - 修改磁盘源码不等于运行进程已升级。重启 bridge、重载扩展并重连 MCP 客户端；DSH 接入方式见 [DSH 接入](docs/dsh-plugin.md)。
@@ -76,6 +76,8 @@ DSH_BRIDGE_URL 支持自定义本机端口；自启会使用此 URL 的端口。
 | `browser_batch` | 连续执行最多 20 步；失败即停止并返回已完成步骤 | 串行写操作 |
 | `browser_request_status` | 查询命令状态与结果；不重放请求 | 读取 |
 | `browser_session` | 获取、续期或释放标签页租约 | 串行写操作 |
+| `browser_session_status` | 原子查看连接、版本、标签页 generation、所有者、租约和读写能力 | 读取 |
+| `browser_ensure_session` | 经扩展确认后续租或重新获取当前任务的标签页控制 | 串行写操作 |
 
 ## 输出和恢复
 
@@ -86,6 +88,7 @@ DSH_BRIDGE_URL 支持自定义本机端口；自启会使用此 URL 的端口。
 - batch 最多 20 步，在 bridge 写队列中连续执行，失败停止，无业务回滚。默认输出预算 16000 字符，过量步骤结果标记 omitted。
 - 页面首次使用自动申请独占控制；适配器按任务身份缓存 session，绝不按共享进程或 tabId 继承其他任务的占用。
 - requestId 用于查询/去重；unknown 不能自动重放。记录保留约 5 分钟、最多 1000 项，服务重启清空；查不到记录不代表未执行。
+- `browser_session_status` 是返回时的已确认快照，`canWrite=true` 只表示该时刻控制权有效；实际动作仍会在队列和扩展派发前再次确认。`browser_ensure_session` 只恢复租约，不抢占其他任务、不绕过用户停止，也不重放 unknown 动作。
 - 默认 open 使用 active=false。截图和 activate 会影响焦点；hover/key 为合成事件，不承诺浏览器默认动作。
 - frameId/documentId、CSS 的 >>> open-shadow 穿透、text=/label=/placeholder=/role= 可用于明确定位。closed shadow、系统对话框、CDP 后端不在此版本范围。
 
@@ -106,8 +109,8 @@ npm run cli -- tabs
 
 同一标签页只允许一个任务；其他任务立即收到 TAB_OCCUPIED，既不排队也不自动接管。status/tabs 可查看占用情况；read/extract/wait/frames 与写操作一样要求任务归属。服务端和扩展端都检查控制会话。
 
-- 租约 60 秒，常驻适配器每 20 秒续租；无执行中命令且 120 秒无页面活动后回收。单纯 WebSocket 心跳不延长空闲占用。
-- agent 崩溃或 CLI 进程退出后，没有续租则约 60 秒回收；CLI 连续命令通过相同任务标识恢复同一归属。
+- 租约 120 秒，常驻适配器每 20 秒续租；无执行中命令且 180 秒无页面活动后回收。单纯 WebSocket 心跳不延长空闲占用。
+- agent 崩溃或 CLI 进程退出后，没有续租则约 120 秒回收；CLI 连续命令通过相同任务标识恢复同一归属。
 - “停止控制”先在扩展本地撤销，再通知 bridge 取消未执行命令；离线也记录停止状态。旧任务不能自动重新占用，用户可在提示条/弹窗点“允许旧任务”恢复其申请资格。
 - 已注入且未结束的脚本保留“停止中”，直至结束或确认旧 document 已被刷新替换；无法确认时不自动交给其他任务。停止不回滚已发生的点击、提交或网络副作用。
 - 停止状态在 Chrome storage.session 中保存，跨扩展 worker 重启恢复。浏览器整体退出不会保留控制会话。

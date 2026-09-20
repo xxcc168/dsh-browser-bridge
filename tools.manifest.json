@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "package": "dsh-browser-bridge",
-  "version": "1.4.1",
-  "description": "统一工具 schema；所有适配器从本文件注册。bridge 协议 2 支持 deadline、请求记录、租约和批量步骤。",
+  "version": "1.5.0",
+  "description": "统一工具 schema；协议 3，通过 atomic-session-v1 确认任务控制状态与租约。",
   "transport": {
     "type": "http",
     "defaultPort": 8765,
@@ -19,9 +19,10 @@
   "constraints": [
     "页面首次操作原子获取任务级独占控制，其他 owner 立即拒绝，不进入队列。",
     "MCP/CLI 必须提供稳定任务 agentId 或宿主身份；DSH 使用 exec.agent。sessionId 不能替代 owner。",
-    "60 秒租约，20 秒客户端续租；无执行中操作且 120 秒无页面活动后回收。连接心跳不重置空闲期限。",
+    "120 秒租约，20 秒客户端续租；无执行中操作且 180 秒无页面活动后回收。连接心跳不重置空闲期限。",
     "手动停止撤销旧控制代次，旧任务被阻止自动重占；未知执行状态须等扩展确认结束。",
-    "所有动作含 eval 都遵守占用；batch 不回滚已执行动作。"
+    "所有动作含 eval 都遵守占用；batch 不回滚已执行动作。",
+    "控制状态须经扩展确认；恢复只重建租约，绝不自动重放 unknown 页面动作。"
   ],
   "tools": [
     {
@@ -1289,6 +1290,74 @@
         },
         "required": [
           "action"
+        ],
+        "additionalProperties": false
+      },
+      "action": null,
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_session_status",
+      "title": "查看当前任务的标签页控制状态",
+      "description": "原子查询连接、运行版本、标签页 generation、所有者、剩余租约和 canRead/canWrite；查询不续租。状态是当前快照，实际动作仍检查归属。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "可选控制会话 id，必须同时属于当前任务；传旧 id 不自动重建"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "action": null,
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "browser_ensure_session",
+      "title": "确认并恢复当前任务的控制权",
+      "description": "确认、续租或在无有效占用者且旧操作已结束时重新获取控制；不抢占、不绕过用户停止、不重放页面动作。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "标签页 id"
+          },
+          "agentId": {
+            "type": "string",
+            "description": "本任务稳定且唯一的标识（建议 UUID）；同一任务连续调用保持不变。宿主已提供身份时可省略"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "页面控制条展示的简短任务名称（不作为身份凭据）"
+          }
+        },
+        "required": [
+          "tabId"
         ],
         "additionalProperties": false
       },

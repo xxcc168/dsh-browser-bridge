@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-bridge",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "private": true,
   "description": "本机 Chrome 桥接：扩展、HTTP/WebSocket 服务、MCP、DSH 与 CLI 的统一项目",
   "type": "module",

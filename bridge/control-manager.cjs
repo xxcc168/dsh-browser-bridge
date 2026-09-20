@@ -5,7 +5,7 @@ const problem=(code,message)=>Object.assign(new Error(code+": "+message),{code,s
 // A synchronous admission decision precedes queue insertion. Extension acknowledgement
 // fences each lease; expiry never hands a tab to another owner before revocation drains.
 class ControlManager {
-  constructor({now=Date.now,sync,onRevoke=()=>{},leaseMs=60000,idleMs=120000}={}) {
+  constructor({now=Date.now,sync,onRevoke=()=>{},leaseMs=120000,idleMs=180000}={}) {
     this.now=now;this.sync=sync;this.onRevoke=onRevoke;this.leaseMs=leaseMs;this.idleMs=idleMs;
     this.leases=new Map();this.blocked=new Map();
   }
@@ -36,9 +36,9 @@ class ControlManager {
     l={id:provisionalId || randomUUID(),tabId,owner,name:String(name || "Agent").replace(/[\u0000-\u001f]/g," ").slice(0,60),
       state:"acquiring",lastActivity:this.now(),expiresAt:this.now()+this.leaseMs,pending:0};
     this.leases.set(tabId,l);
-    l.ready=this.sync(l,"grant").then(()=>{
+    l.ready=this.sync(l,"grant").then(reply=>{
       if(this.leases.get(tabId)!==l || l.state!=="acquiring")throw problem("CONTROL_STOPPED","获取期间控制已被撤销");
-      l.state="active";return l;
+      l.state="active";l.confirmation=reply;return l;
     }).catch(err=>{
       // A lost grant acknowledgement is not proof the extension did not install it.
       if(this.leases.get(tabId)===l)this.revoke(l,"grant_failed");
@@ -54,7 +54,38 @@ class ControlManager {
       this.revoke(l,"lease_expired");throw problem("SESSION_EXPIRED","页面占用已过期");
     }
   }
-  renew(owner,ids) {
+  async confirm(l,owner) {
+    await l.ready;
+    this.check(l,owner);
+    if(!l.confirming)l.confirming=(async()=>{
+      try {
+        l.confirmation=await this.sync(l,"renew");
+        this.check(l,owner);
+        return l;
+      } catch(err) {
+        void this.revoke(l,"renew_failed");
+        throw err;
+      }
+    })().finally(()=>{l.confirming=null;});
+    return l.confirming;
+  }
+  async ensure(tabId,owner,name) {
+    this.assertOwner(owner);
+    this.sweep();
+    const previous=this.leases.get(tabId);
+    // Only a confirmed drain permits reuse. Manual stops remain owner-blocked.
+    if(previous?.state==="stopping")await previous.stopping;
+    let l=this.admit(tabId,owner,name);
+    try {await this.confirm(l,owner);}
+    catch(err) {
+      if(!["CONTROL_REVOKED","SESSION_EXPIRED"].includes(err.code))throw err;
+      await l.stopping;
+      if(this.leases.has(tabId))throw err;
+      l=this.admit(tabId,owner,name);await this.confirm(l,owner);
+    }
+    return l;
+  }
+  async renew(owner,ids) {
     const renewed=[];
     for(const id of ids) {
       const l=[...this.leases.values()].find(x=>x.id===id && x.owner===owner);
@@ -62,8 +93,7 @@ class ControlManager {
       if(this.now()>=l.expiresAt || (l.pending===0 && this.now()-l.lastActivity>=this.idleMs)) {this.revoke(l,"idle_timeout");continue;}
       // Transport liveness may keep an active command alive, but cannot reset idle time.
       l.expiresAt=Math.min(this.now()+this.leaseMs,l.pending?Infinity:l.lastActivity+this.idleMs);
-      renewed.push(l.id);
-      void this.sync(l,"renew").catch(()=>{});
+      try {await this.confirm(l,owner);renewed.push(l.id);}catch{/* Failed acknowledgement fences this lease. */}
     }
     return renewed;
   }
@@ -82,7 +112,10 @@ class ControlManager {
   }
   drained(tabId,id) {
     const l=this.leases.get(tabId);
-    if(l?.id===id && l.state==="stopping")this.leases.delete(tabId);
+    if(l?.id===id) {
+      if(l.state!=="stopping") {l.state="stopping";l.reason="extension_released";this.onRevoke(l);}
+      this.leases.delete(tabId);
+    }
   }
   sweep() {
     for(const l of this.leases.values())

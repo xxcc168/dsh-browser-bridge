@@ -1,6 +1,6 @@
 # Bridge 协议 3
 
-适用于 bridge 1.3.0 / 扩展 1.2.0。HTTP 默认仅监听 127.0.0.1:8765。以下动作协议通过隔离 bridge + 模拟扩展验证；真实 Chrome 更新后还应运行本地 /test 验收。
+适用于 bridge/扩展 1.5.0。HTTP 默认仅监听 127.0.0.1:8765。以下动作协议通过隔离 bridge + 模拟扩展验证；真实 Chrome 更新后还应运行本地 /test 验收。
 
 ## 请求与错误
 
@@ -16,7 +16,7 @@
 
 ## 状态与标签页
 
-GET /api/status 返回 ok、version、protocolVersion、instanceId、connected、extension、lastHeartbeatAt、heartbeatAgeMs、reconnects、uptimeSec、pending、queuedWrites。connected 基于 socket 与心跳，不只是 readyState。
+GET /api/status 返回 ok、version、protocolVersion、instanceId、connected、extension、capabilities、connectionGeneration、expectedExtensionVersion、lastHeartbeatAt、heartbeatAgeMs、reconnects、uptimeSec、pending、queuedWrites。connected 基于 socket 与心跳，不只是 readyState。
 
 GET /api/tabs 返回数组，字段 id/windowId/index/title/url/active/pinned/status，默认没有 favicon。GET /api/tabs/active 返回最后聚焦窗口的活动标签页。
 
@@ -46,7 +46,9 @@ POST /api/tabs 接收 {url,active?,windowId?}，active 默认 false。DELETE /ap
 
 POST /api/tabs/:id/batch：{steps:[{action,...}],maxOutput?,timeout?}。HTTP 总时限由 X-DSH-Deadline 控制；适配器把 timeout 转为该头。最多 20 步，连续执行；失败返回 HTTP 422，含 failedStep、completedSteps、state、error、code。成功返回 steps；超输出预算的步骤结果使用 omitted 标记。动作不回滚。
 
-POST /api/sessions：action=acquire 时 tabId 必填；renew 接受 sessionId 或 sessionIds 数组；release 接受 sessionId。owner 必须匹配。租约固定 60 秒，续租不重置最后页面活动时间，120 秒空闲且无执行中动作则停止回收。正常动作可自动原子申请，无需 agent 每次手工 acquire。
+POST /api/sessions：action=acquire 时 tabId 必填；renew 接受 sessionId 或 sessionIds 数组；release 接受 sessionId。owner 必须匹配。租约固定 120 秒，续租不重置最后页面活动时间，180 秒空闲且无执行中动作则停止回收。正常动作可自动原子申请，无需 agent 每次手工 acquire。
+
+POST /api/sessions：action=status 返回经当前扩展确认的单次快照，包括 connected、版本、tabGeneration、controlGeneration、currentOwner、剩余租约、canRead、canWrite、reacquireAllowed 和 recovery。status 不续租。action=ensure 只在无其他有效所有者、无未结束脚本且未被用户停止时确认续租或重新获取；不抢占、不重放动作。
 
 冲突在请求入队前立即返回 TAB_OCCUPIED。手动停止后的同 owner 返回 CONTROL_STOPPED；旧凭据返回 SESSION_EXPIRED/CONTROL_REVOKED。取消、失联、过期须经扩展撤销确认；存在未结束脚本时保留 stopping，不直接删除租约。
 

@@ -55,7 +55,7 @@ async function connect(force = false) {
       setStatus(true, "已连接");
       void controlReady.then(()=>send(sock,{type:"hello",...controlSnapshot(),info:{
         name:chrome.runtime.getManifest().name,version:chrome.runtime.getManifest().version,
-        protocolVersion:3,capabilities:["exclusive-control","user-stop","idle-release","deadline","frames","batch-actions"],
+        protocolVersion:3,capabilities:["exclusive-control","user-stop","idle-release","deadline","frames","batch-actions","atomic-session-v1"],
       }}));
       send(sock, {type:"ping",t:Date.now()});
       heartbeatTimer = setInterval(heartbeat, 15000);
@@ -145,7 +145,7 @@ async function runCommand(cmd) {
     if (cmd.windowId !== undefined) options.windowId = cmd.windowId;
     const tab=await chrome.tabs.create(options);
     tabControls.set(tab.id,{id:cmd.provisionalId,tabId:tab.id,owner:cmd.owner,agentName:cmd.agentName || "Agent",
-      state:"active",expiresAt:Date.now()+60000});
+    state:"active",expiresAt:Date.now()+120000});
     await persistControls();await updateControlUI(tab.id);
     return tabInfo(tab);
   }
@@ -427,9 +427,12 @@ async function evaluateExpr(cmd) {
 chrome.alarms.create("dsb-keepalive",{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(alarm=>{if(alarm.name==="dsb-keepalive") {heartbeat();void controlTick();}});
 setInterval(()=>void controlTick(),1000);
-chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.status==="complete")void documentChanged(tabId);});
+chrome.tabs.onUpdated.addListener((tabId,change)=>{
+  if(change.status==="loading" || change.url)tabGenerations.set(tabId,crypto.randomUUID());
+  if(change.status==="complete")void documentChanged(tabId);
+});
 chrome.tabs.onRemoved.addListener(tabId=>{
-  tabControls.delete(tabId);blockedOwners.delete(tabId);
+  tabControls.delete(tabId);blockedOwners.delete(tabId);tabGenerations.delete(tabId);
   for(const [id,r] of runningControls)if(r.tabId===tabId)runningControls.delete(id);
   void persistControls();send(ws,{type:"tabClosed",tabId});
 });

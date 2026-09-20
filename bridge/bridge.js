@@ -6,7 +6,8 @@ const {WebSocketServer} = require("ws");
 const {ControlManager}=require("./control-manager.cjs");
 const PORT = Number(process.env.DSH_BRIDGE_PORT || 8765);
 const HOST = "127.0.0.1";
-const VERSION = "1.3.0";
+const VERSION = require("../package.json").version;
+const EXTENSION_VERSION = require("../extension/manifest.json").version;
 const WAIT_CONNECT_MS = Number(process.env.DSH_BRIDGE_WAIT || 12000);
 const COMMAND_TIMEOUT_MS = Number(process.env.DSH_BRIDGE_TIMEOUT || 30000);
 const TOKEN = process.env.DSH_BRIDGE_TOKEN || "";
@@ -17,7 +18,7 @@ const controls=new ControlManager({sync:syncControl,onRevoke:(l,{closed=false}={
 }});
 const WRITE_ACTIONS=new Set(["open","close","navigate","activate","click","type","key","scroll","check","select","hover","screenshot","evaluate","batch"]);
 const ACTIONS=new Set([...WRITE_ACTIONS,"readPage","extract","wait","frames","listTabs","getActive","ping"]);
-let extSocket=null,extInfo=null,lastPongAt=0,reconnects=0,queuedWrites=0,nextScreenshotAt=0;
+let extSocket=null,extInfo=null,lastPongAt=0,reconnects=0,queuedWrites=0,nextScreenshotAt=0,connectionGeneration=0;
 let writeTail=Promise.resolve();
 const log=(...args)=>console.log(new Date().toISOString(),"[bridge]",...args);
 const error=(code,message,statusCode=400,definitive=true)=>Object.assign(new Error(code+": "+message),{code,statusCode,definitive});
@@ -38,7 +39,7 @@ function syncControl(lease,action) {
   const id=randomUUID(),socket=extSocket;
   return new Promise((resolve,reject)=>{
     const timer=setTimeout(()=>{controlRequests.delete(id);reject(error("CONTROL_SYNC_TIMEOUT","控制状态同步未确认",504,false));},5000);
-    controlRequests.set(id,{socket,resolve,reject,timer});
+    controlRequests.set(id,{socket,resolve,reject,timer,generation:connectionGeneration});
     socket.send(JSON.stringify({type:"control",id,action,instanceId,lease:{...controls.public(lease),id:lease.id,owner:lease.owner}}));
   });
 }
@@ -55,13 +56,15 @@ function rejectPendingForSocket(sock) {
 const wss=new WebSocketServer({noServer:true,maxPayload:4*1024*1024});
 wss.on("connection",sock=>{
   if(extSocket) {rejectPendingForSocket(extSocket);extSocket.close(1000,"Replaced by new connection");reconnects++;}
-  extSocket=sock;extInfo=null;lastPongAt=Date.now();
+  extSocket=sock;extInfo=null;lastPongAt=Date.now();connectionGeneration++;
   sock.on("message",raw=>{
     let msg;try{msg=JSON.parse(raw);}catch{return;}
     if(msg.type==="controlAck") {
       const p=controlRequests.get(msg.id);if(!p || p.socket!==sock)return;
       controlRequests.delete(msg.id);clearTimeout(p.timer);
-      msg.ok===false?p.reject(error("CONTROL_SYNC_FAILED",msg.error || "扩展拒绝控制同步",409)):p.resolve(msg);
+      if(sock!==extSocket)return p.reject(disconnected());
+      const code=/^([A-Z_]+):?/.exec(msg.error || "")?.[1] || "CONTROL_SYNC_FAILED";
+      msg.ok===false?p.reject(error(code,msg.error || "扩展拒绝控制同步",409)):p.resolve({...msg,connectionGeneration:p.generation});
     } else if(sock===extSocket && msg.type==="controlDrained") {
       controls.drained(msg.tabId,msg.leaseId);
     } else if(sock===extSocket && msg.type==="userStop") {
@@ -134,6 +137,11 @@ async function sendCommand(action,params,ctx) {
     if(delay>0) await new Promise(r=>setTimeout(r,delay));
     checkContext(ctx);nextScreenshotAt=Date.now()+600;
   }
+  // Queue waits and a previously returned status are not permission to write.
+  // Confirm the current lease with the extension immediately before dispatch.
+  if(ctx.lease)await controls.confirm(ctx.lease,ctx.owner);
+  checkContext(ctx);
+  if(sock!==extSocket)throw disconnected();
   const id=ctx.record.id+":"+(ctx.commandIndex=(ctx.commandIndex || 0)+1);
   return new Promise((resolve,reject)=>{
     const timeout=Math.min(ctx.deadline-Date.now(),Math.max(COMMAND_TIMEOUT_MS,action==="wait"?(params.timeout || 10000)+500:0));
@@ -199,24 +207,85 @@ async function batch(body,ctx) {
 }
 function statusJson() {
   return {ok:true,version:VERSION,protocolVersion:3,instanceId,connected:healthy(),extension:extInfo,
+    capabilities:["atomic-session-v1"],connectionGeneration,expectedExtensionVersion:EXTENSION_VERSION,
     lastHeartbeatAt:lastPongAt || null,heartbeatAgeMs:lastPongAt?Date.now()-lastPongAt:null,reconnects,
     uptimeSec:Math.round((Date.now()-startedAt)/1000),port:PORT,pending:pending.size,queuedWrites,controlledTabs:controls.leases.size};
+}
+function supportsSessions() {return healthy() && extInfo?.protocolVersion===3 && extInfo?.capabilities?.includes("atomic-session-v1");}
+function sessionView(tabId,owner,sessionId,confirmation) {
+  const now=Date.now(),l=controls.leases.get(tabId),snapshot=confirmation?.snapshot;
+  const verified=!!(supportsSessions() && snapshot && confirmation.connectionGeneration===connectionGeneration);
+  const remote=verified?snapshot.control:null;
+  const blocked=!!(controls.blocked.get(tabId)?.has(owner) || (verified && snapshot.blocked));
+  const matches=!!(l && remote && l.id===remote.id && l.owner===remote.owner);
+  const valid=!!(verified && snapshot.tab && matches && !blocked && l.owner===owner && l.state==="active" &&
+    remote.state==="active" && now<Math.min(l.expiresAt,remote.expiresAt) && (!sessionId || sessionId===l.id));
+  const current=remote || l;
+  const currentOwner=current?.owner;
+  const occupied=!!(currentOwner && currentOwner!==owner);
+  const draining=l?.state==="stopping" || remote?.state==="stopping" || (!remote && verified && snapshot.running>0);
+  const reacquireAllowed=!!(verified && snapshot.tab && !blocked && !occupied && !draining);
+  let reason=valid?null:!healthy()?"EXTENSION_DISCONNECTED":!supportsSessions()?"UPGRADE_REQUIRED":blocked?"CONTROL_STOPPED":
+    verified && !snapshot.tab?"TAB_NOT_FOUND":occupied?"TAB_OCCUPIED":draining?"CONTROL_STOPPING":
+    sessionId && sessionId!==l?.id?"SESSION_EXPIRED":"CONTROL_REVOKED";
+  const action=valid?"use_session":!healthy()?"reconnect_extension":!supportsSessions()?"reload_extension":blocked?"user_allow_control":
+    reason==="TAB_NOT_FOUND"?"list_tabs":occupied?"wait_for_owner":draining?"wait_for_drain":"ensure_session";
+  const expiresAt=valid?Math.min(l.expiresAt,remote.expiresAt):current?.expiresAt || null;
+  return {tabId,connected:healthy(),verified,observedAt:now,instanceId,connectionGeneration,
+    versions:{bridge:VERSION,extension:extInfo?.version || null,expectedExtension:EXTENSION_VERSION,
+      extensionMatches:extInfo?.version===EXTENSION_VERSION},
+    tab:verified?snapshot.tab:null,tabGeneration:verified?snapshot.tab?.generation || null:null,
+    controlGeneration:current?.id || null,
+    currentOwner:currentOwner?{id:createHash("sha256").update(currentOwner).digest("hex").slice(0,16),
+      agentName:current.agentName || current.name,isCurrentTask:currentOwner===owner}:null,
+    sessionId:l?.owner===owner?l.id:null,state:valid?"active":reason,reason,
+    expiresAt,remainingLeaseMs:expiresAt?Math.max(0,expiresAt-now):0,idleExpiresAt:l?l.lastActivity+controls.idleMs:null,
+    canRead:valid,canWrite:valid,capabilityScope:"tab_control",reacquireAllowed,
+    recovery:{action,tool:action==="ensure_session"?"browser_ensure_session":action==="list_tabs"?"browser_tabs":null,
+      automaticRetryAllowed:false}};
+}
+function recoveryDetails(code,tabId,owner,state,requestId,confirmation) {
+  const control=Number.isInteger(tabId) && owner?sessionView(tabId,owner,undefined,confirmation):null;
+  return {...(control?{session:control}:{}),recovery:state==="unknown"?
+    {action:"inspect_request_and_page",tool:"browser_request_status",requestId,automaticRetryAllowed:false,
+      message:"先查询此请求并核验页面结果；未找到记录也不能认定未执行，勿换 requestId 重放写操作。"}:
+    control?.recovery || {action:"check_status",tool:"browser_status",automaticRetryAllowed:false}};
+}
+async function describeFailure(code,tabId,owner,state,requestId) {
+  let confirmation;
+  if(Number.isInteger(tabId) && owner && supportsSessions() &&
+    /^(CONTROL_|SESSION_|TAB_OCCUPIED|TAB_NOT_FOUND)/.test(code || "")) {
+    try {confirmation=await syncControl({tabId,owner},"inspect");}catch{/* Unverified state stays explicitly non-writable. */}
+  }
+  return recoveryDetails(code,tabId,owner,state,requestId,confirmation);
 }
 function publicRecord(r) {
   const result=r.result?.dataUrl?{tabId:r.result.tabId,imageAvailable:true}:r.result;
   const serialized=result===undefined?"":JSON.stringify(result);
   return {requestId:r.id,state:r.state,createdAt:r.createdAt,updatedAt:r.updatedAt,deadline:r.deadline,
+    ...(r.state==="unknown"?recoveryDetails(r.code,r.tabId,r.owner,r.state,r.id):{}),
     ...(r.error?{error:r.error,code:r.code}:{}),
     ...(serialized.length>16000?{resultPreview:serialized.slice(0,16000),truncated:true}:{result})};
 }
 async function session(body,owner,name) {
   controls.assertOwner(owner);
+  if(["status","ensure"].includes(body.action)) {
+    if(!Number.isInteger(body.tabId) || body.tabId<0)throw error("INVALID_ARGUMENT","tabId 必填");
+    if(!supportsSessions())return sessionView(body.tabId,owner,body.sessionId);
+    if(body.action==="status") {
+      controls.sweep();
+      const reply=await syncControl({tabId:body.tabId,owner,name},"inspect");
+      return sessionView(body.tabId,owner,body.sessionId,reply);
+    }
+    const l=await controls.ensure(body.tabId,owner,name);
+    return sessionView(body.tabId,owner,undefined,l.confirmation);
+  }
   if(body.action==="acquire") {
     if(!Number.isInteger(body.tabId) || body.tabId<0)throw error("INVALID_ARGUMENT","tabId 必填");
     const l=controls.admit(body.tabId,owner,name,body.sessionId);
-    await l.ready;return controls.public(l);
+    await controls.confirm(l,owner);return controls.public(l);
   }
-  if(body.action==="renew")return {renewed:controls.renew(owner,body.sessionIds || [body.sessionId])};
+  if(body.action==="renew")return {renewed:await controls.renew(owner,body.sessionIds || [body.sessionId])};
   if(body.action==="release")return controls.release(owner,body.sessionId);
   throw error("INVALID_ARGUMENT","未知控制会话操作");
 }
@@ -271,12 +340,14 @@ document.getElementById("box").onkeydown = function (e) {
 </body>
 </html>`;
 const server=http.createServer(async(req,res)=>{
+  let requestOwner,requestTab;
   try {
     if(TOKEN && req.headers.authorization!=="Bearer "+TOKEN) throw error("UNAUTHORIZED","访问令牌无效",401);
     const url=new URL(req.url,"http://127.0.0.1");
     if(req.method==="GET" && url.pathname==="/test") {res.writeHead(200,{"Content-Type":"text/html; charset=utf-8"});res.end(TEST_HTML);return;}
     if(req.method==="GET" && (url.pathname==="/" || url.pathname==="/api/status")) return sendJson(res,200,statusJson());
     const owner=req.headers["x-dsh-owner"];
+    requestOwner=owner;
     let ownerName;try{ownerName=decodeURIComponent(req.headers["x-dsh-agent-name"] || "Agent");}catch{throw error("INVALID_ARGUMENT","agent name 编码错误");}
     if(req.method==="GET" && url.pathname.startsWith("/api/requests/")) {
       cleanup();const r=records.get(decodeURIComponent(url.pathname.slice(14)));
@@ -285,6 +356,7 @@ const server=http.createServer(async(req,res)=>{
       return sendJson(res,200,publicRecord(r));
     }
     const body=await readBody(req);
+    requestTab=body?.tabId;
     if(req.method==="POST" && url.pathname==="/api/sessions") return sendJson(res,200,await session(body,owner,ownerName));
     let action,tabId;
     if(url.pathname==="/api/tabs") action=req.method==="GET"?"listTabs":req.method==="POST"?"open":null;
@@ -299,6 +371,7 @@ const server=http.createServer(async(req,res)=>{
       }
     }
     if(!ACTIONS.has(action)) throw error("NOT_FOUND","未知接口",404);
+    requestTab=tabId;
     if(!body || typeof body!=="object" || Array.isArray(body)) throw error("INVALID_ARGUMENT","body 必须是对象");
     const params={...body,...Object.fromEntries(url.searchParams),...(tabId!==undefined?{tabId}:{})};
     delete params.action;
@@ -350,11 +423,14 @@ const server=http.createServer(async(req,res)=>{
         });
       await record.promise;
     }
-    const data=record.error?{error:record.error,code:record.code,state:record.state,requestId}:
+    const data=record.error?{error:record.error,code:record.code,state:record.state,requestId,
+      ...await describeFailure(record.code,tabId,owner,record.state,requestId)}:
       Array.isArray(record.result)?record.result:{...record.result,requestId};
+    if(data?.ok===false)Object.assign(data,await describeFailure(data.code,tabId,owner,data.state,requestId));
     res.setHeader("X-DSH-Request-Id",requestId);
     sendJson(res,record.httpStatus || 200,data);
-  } catch(err) {sendJson(res,err.statusCode || 500,{error:err.message,code:err.code || "BRIDGE_ERROR"});}
+  } catch(err) {sendJson(res,err.statusCode || 500,{error:err.message,code:err.code || "BRIDGE_ERROR",
+    ...await describeFailure(err.code,requestTab,requestOwner)});}
 });
 server.on("upgrade",(req,socket,head)=>{
   const url=new URL(req.url,"http://127.0.0.1");

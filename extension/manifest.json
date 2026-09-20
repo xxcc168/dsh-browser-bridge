@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DSH Browser Bridge",
-  "version": "1.2.0",
+  "version": "1.5.0",
   "description": "让 DeepSeek Harness 读取并控制当前浏览器：查看页面内容、点击、输入、按键、滚动、打开/关闭标签页、截图。",
   "minimum_chrome_version": "120",
   "permissions": [

@@ -24,7 +24,7 @@ for(const tool of manifest.tools) {
     tool.inputSchema.required.includes(key)?schema(value):schema(value).optional()]));
   server.registerTool(tool.name,{
     title:tool.title,description:tool.description,inputSchema:shape,
-    annotations:{readOnlyHint:["browser_status","browser_tabs","browser_request_status"].includes(tool.name),
+    annotations:{readOnlyHint:["browser_status","browser_tabs","browser_request_status","browser_session_status"].includes(tool.name),
       destructiveHint:!tool.concurrencySafe,openWorldHint:true},
   },async(args,extra)=>{
     try {

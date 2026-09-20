@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
 import {createRequire} from "node:module";
 import net from "node:net";
+import http from "node:http";
 import {once} from "node:events";
 import {fileURLToPath} from "node:url";
 import {BridgeClient,manifest,resolveBridgeDir} from "../lib/runtime.js";
@@ -19,13 +20,18 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function attach() {
   const sock=new WebSocket(base.replace("http:","ws:")+"/ws");
   await once(sock,"open");
-  sock.send(JSON.stringify({type:"hello",info:{version:"test",protocolVersion:3},controls:[...localControls.values()],
+  sock.send(JSON.stringify({type:"hello",info:{version:"1.5.0",protocolVersion:3,capabilities:["atomic-session-v1"]},controls:[...localControls.values()],
     blocked:[...blocked].map(([tabId,owners])=>({tabId,owners:[...owners]}))}));
   sock.on("message",raw=>{
     const message=JSON.parse(raw);
     if(message.type==="ping"){sock.send(JSON.stringify({type:"pong",t:message.t}));return;}
     if(message.type==="control") {
       const l=message.lease;
+      const snapshot=()=>({tab:l.tabId===404?null:{id:l.tabId,url:"https://fixture.test/",title:"Fixture",generation:"fixture-generation-"+l.tabId},
+        control:localControls.get(l.tabId) || null,blocked:!!blocked.get(l.tabId)?.has(l.owner),running:running.has(l.tabId)?1:0});
+      if(message.action==="inspect") {
+        sock.send(JSON.stringify({type:"controlAck",id:message.id,ok:true,snapshot:snapshot()}));return;
+      }
       if(message.action==="revoke") {
         const existing=localControls.get(l.tabId);if(existing)existing.state="stopping";
         const drained=!running.has(l.tabId);
@@ -34,9 +40,12 @@ async function attach() {
       }
       if(blocked.get(l.tabId)?.has(l.owner)) {sock.send(JSON.stringify({type:"controlAck",id:message.id,ok:false,error:"CONTROL_STOPPED"}));return;}
       const existing=localControls.get(l.tabId);
+      if(message.action==="renew" && (!existing || existing.expiresAt<=Date.now())) {
+        sock.send(JSON.stringify({type:"controlAck",id:message.id,ok:false,error:"CONTROL_REVOKED"}));return;
+      }
       if(existing && existing.id!==l.id){sock.send(JSON.stringify({type:"controlAck",id:message.id,ok:false,error:"TAB_OCCUPIED"}));return;}
       localControls.set(l.tabId,{...l,state:"active"});
-      sock.send(JSON.stringify({type:"controlAck",id:message.id,ok:true,drained:false}));return;
+      sock.send(JSON.stringify({type:"controlAck",id:message.id,ok:true,drained:false,snapshot:snapshot()}));return;
     }
     if(message.type!=="command")return;
     const c=message.command;calls.push(c);
@@ -146,6 +155,11 @@ test("MCP enforces task identity even when two agents share one connection",asyn
     assert.equal(missing.isError,true);assert.match(missing.content[0].text,/AGENT_ID_REQUIRED/);
     const a=await client.callTool({name:"browser_click",arguments:{tabId:17,selector:"#button",agentId:"task-A"}});
     assert.notEqual(a.isError,true);
+    const status=await client.callTool({name:"browser_session_status",arguments:{tabId:17,agentId:"task-A"}});
+    const observed=JSON.parse(status.content[0].text);
+    assert.equal(observed.canWrite,true);assert.equal(observed.versions.adapter,"1.5.0");
+    const ensured=await client.callTool({name:"browser_ensure_session",arguments:{tabId:17,agentId:"task-A"}});
+    assert.equal(JSON.parse(ensured.content[0].text).sessionId,observed.sessionId);
     const b=await client.callTool({name:"browser_click",arguments:{tabId:17,selector:"#button",agentId:"task-B"}});
     assert.equal(b.isError,true);assert.match(b.content[0].text,/TAB_OCCUPIED/);
     const shot=await client.callTool({name:"browser_screenshot",arguments:{tabId:17,agentId:"task-A"}});
@@ -179,4 +193,87 @@ test("automatic claim holds between calls and explicit release lets another task
 test("tabClosed notification does not cancel the close request that caused it",async()=>{
   const result=await api("/api/tabs/20",{},{},"DELETE");
   assert.equal(result.status,200);assert.equal(result.data.closed,20);
+});
+
+test("session status is a verified read; ensure atomically acquires, renews and rejects competitors",async()=>{
+  const unused=await api("/api/sessions",{action:"status",tabId:30});
+  assert.equal(unused.data.verified,true);assert.equal(unused.data.canWrite,false);
+  assert.equal(unused.data.reacquireAllowed,true);assert.equal(localControls.has(30),false);
+  const first=await api("/api/sessions",{action:"ensure",tabId:30});
+  assert.equal(first.data.canWrite,true);assert.equal(first.data.currentOwner.isCurrentTask,true);
+  assert.equal(first.data.tabGeneration,"fixture-generation-30");assert.ok(first.data.remainingLeaseMs>59000);
+  assert.equal(JSON.stringify(first.data).includes(A),false);
+  const expiry=localControls.get(30).expiresAt;
+  const status=await api("/api/sessions",{action:"status",tabId:30,sessionId:first.data.sessionId});
+  assert.equal(status.data.canRead,true);assert.equal(localControls.get(30).expiresAt,expiry);
+  const stale=await api("/api/sessions",{action:"status",tabId:30,sessionId:"stale"});
+  assert.equal(stale.data.canWrite,false);assert.equal(stale.data.reason,"SESSION_EXPIRED");
+  const competitor=await api("/api/sessions",{action:"ensure",tabId:30},{"X-DSH-Owner":B});
+  assert.equal(competitor.status,409);assert.equal(competitor.data.code,"TAB_OCCUPIED");
+  assert.equal(competitor.data.session.currentOwner.isCurrentTask,false);
+  assert.equal(competitor.data.recovery.action,"wait_for_owner");
+  assert.equal(competitor.data.session.verified,true);
+  assert.equal(competitor.data.session.tabGeneration,"fixture-generation-30");
+  const renewed=await api("/api/sessions",{action:"ensure",tabId:30});
+  assert.equal(renewed.data.sessionId,first.data.sessionId);
+  const missing=await api("/api/sessions",{action:"status",tabId:404});
+  assert.equal(missing.data.reason,"TAB_NOT_FOUND");assert.equal(missing.data.canWrite,false);
+});
+
+test("stale client cache recovers a drained lease before clicking exactly once",async()=>{
+  const client=new BridgeClient({url:base,autoStart:false});
+  try {
+    const first=await client.run("browser_ensure_session",{tabId:31,agentId:"resume"});
+    localControls.delete(31); // Browser expired first; bridge still believes its lease is active.
+    const stale=await client.run("browser_session_status",{tabId:31,agentId:"resume"});
+    assert.equal(stale.data.connected,true);assert.equal(stale.data.canWrite,false);
+    await client.run("browser_click",{tabId:31,agentId:"resume",selector:"#resume-once"});
+    assert.notEqual(localControls.get(31).id,first.data.sessionId);
+    assert.equal(calls.filter(c=>c.selector==="#resume-once").length,1);
+    await assert.rejects(client.run("browser_click",{tabId:31,agentId:"resume",sessionId:first.data.sessionId,selector:"#stale-never"}),/SESSION_EXPIRED/);
+    assert.equal(calls.some(c=>c.selector==="#stale-never"),false);
+  }finally{await client.releaseControls();client.close();}
+});
+
+test("ensure never bypasses user stop or an unresolved operation",async()=>{
+  const first=api("/api/tabs/32/click",{selector:"#hold"});await pause(30);
+  const l=localControls.get(32);l.state="stopping";blocked.set(32,new Set([A]));
+  socket.send(JSON.stringify({type:"userStop",tabId:32,leaseId:l.id}));await pause(20);
+  const other=await api("/api/sessions",{action:"ensure",tabId:32},{"X-DSH-Owner":B});
+  assert.equal(other.status,409);assert.equal(other.data.session.canWrite,false);
+  const result=await first;
+  assert.equal(result.data.state,"unknown");assert.equal(result.data.recovery.action,"inspect_request_and_page");
+  assert.equal(result.data.recovery.automaticRetryAllowed,false);
+  await pause(280);
+  const stopped=await api("/api/sessions",{action:"ensure",tabId:32});
+  assert.equal(stopped.data.code,"CONTROL_STOPPED");assert.equal(stopped.data.recovery.action,"user_allow_control");
+});
+
+test("an old live bridge is diagnosed and receives no page commands",async()=>{
+  const received=[];
+  const legacy=http.createServer((req,res)=>{
+    received.push(req.url);req.resume();res.setHeader("Content-Type","application/json");
+    if(req.url==="/api/status")return res.end(JSON.stringify({ok:true,connected:true,version:"1.3.0",protocolVersion:3,extension:{version:"1.2.0",protocolVersion:3}}));
+    res.statusCode=400;res.end(JSON.stringify({code:"INVALID_ARGUMENT",error:"未知控制会话操作"}));
+  });
+  legacy.listen(0,"127.0.0.1");await once(legacy,"listening");
+  const client=new BridgeClient({url:"http://127.0.0.1:"+legacy.address().port,autoStart:false});
+  try {
+    const status=await client.run("browser_session_status",{tabId:1,agentId:"upgrade"});
+    assert.equal(status.data.canWrite,false);assert.equal(status.data.reason,"UPGRADE_REQUIRED");
+    assert.equal(status.data.versions.bridge,"1.3.0");assert.equal(status.data.versions.adapter,"1.5.0");
+    await assert.rejects(client.run("browser_click",{tabId:1,agentId:"upgrade",selector:"#never"}),/UPGRADE_REQUIRED/);
+    assert.equal(received.some(path=>path.includes("/api/tabs/")),false);
+  }finally{client.close();await new Promise(resolve=>legacy.close(resolve));}
+});
+
+test("old extension and disconnected transport report non-writable diagnostic state",async()=>{
+  socket.send(JSON.stringify({type:"hello",info:{version:"1.2.0",protocolVersion:3},controls:[]}));await pause(20);
+  const old=await api("/api/sessions",{action:"status",tabId:30});
+  assert.equal(old.data.canWrite,false);assert.equal(old.data.reason,"UPGRADE_REQUIRED");
+  assert.equal(old.data.recovery.action,"reload_extension");
+  socket.close();await once(socket,"close");await pause(20);
+  const offline=await api("/api/sessions",{action:"status",tabId:30});
+  assert.equal(offline.data.connected,false);assert.equal(offline.data.canWrite,false);
+  assert.equal(offline.data.recovery.action,"reconnect_extension");
 });

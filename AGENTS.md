@@ -4,7 +4,7 @@
 
 ## 架构与事实源
 
-- tools.manifest.json：23 个工具的名称、JSON Schema、调度与动作映射。
+- tools.manifest.json：25 个工具的名称、JSON Schema、调度与动作映射。
 - lib/runtime.js：框架无关传输、进程生命周期、输出和搜索。
 - lib/index.js：DSH 注册；examples/mcp-server.mjs：MCP 注册；examples/cli.mjs：CLI。
 - bridge/bridge.js、bridge/control-manager.cjs：HTTP、WebSocket、FIFO、请求缓存、deadline、租约和 batch；bridge/package.json 仅定义 CommonJS 边界，依赖统一在根 package.json。
@@ -17,7 +17,7 @@
 - wait 不滚动，超时必须失败；输入/点击不得伪装成功。单次 click 不可触发两个 click。
 - structured DOM 动作用扩展注入，任意表达式 eval 仍受页面 CSP 约束。
 - 明确 tabId/frameId 与稳定任务身份。占用按 owner+tabId 维护，不得按共享进程或 tabId 自动继承其他任务的 session。
-- 页面首次使用强制独占；不同 owner 在入队前立即拒绝，不排队接管。租约 60 秒、空闲期限 120 秒，心跳不重置页面活动时间。
+- 页面首次使用强制独占；不同 owner 在入队前立即拒绝，不排队接管。租约 120 秒、空闲期限 180 秒，心跳不重置页面活动时间。
 - 用户停止必须先在扩展本地撤销，取消队列且阻止旧 owner 自动重占。未结束脚本须等待结束/document 替换，不能仅到期就交接。
 - 页面提示放在 closed shadow 并从抓取中排除。控制按钮只接受真实用户事件；提供扩展弹窗替代入口。
 - deadline 包含排队；取消的未发送命令不可下发。已发送结果不明标记 unknown，不自动重放写操作。

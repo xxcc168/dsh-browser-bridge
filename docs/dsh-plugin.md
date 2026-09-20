@@ -1,6 +1,6 @@
 # DSH 插件维护
 
-推荐通过 DSH 的 @deepseek-ai/dsh-mcp-client 连接本项目 examples/mcp-server.mjs；当前本机 web profile 使用这一方式。共享 23 个工具，不需要在 profile dependencies 中再安装旧版原生插件。宿主缺少任务元数据时，调用者仍须按 README 传稳定 agentId。
+推荐通过 DSH 的 @deepseek-ai/dsh-mcp-client 连接本项目 examples/mcp-server.mjs；当前本机 web profile 使用这一方式。共享 25 个工具，不需要在 profile dependencies 中再安装旧版原生插件。宿主缺少任务元数据时，调用者仍须按 README 传稳定 agentId。
 
 在 profile 的 cordis.patch.yml 合并以下条目，保留其余配置，并把路径改成本机项目路径：
 

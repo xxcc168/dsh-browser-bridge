@@ -1,5 +1,17 @@
 // Extension-owned control state. Never accept a stop/allow request from page JS.
 const tabControls=new Map(),runningControls=new Map(),blockedOwners=new Map();
+const tabGenerations=new Map();
+function tabGeneration(tabId) {
+  if(!tabGenerations.has(tabId))tabGenerations.set(tabId,crypto.randomUUID());
+  return tabGenerations.get(tabId);
+}
+function sessionSnapshot(tab,owner) {
+  const l=tabControls.get(tab.id);
+  return {tab:{id:tab.id,url:tab.url || "",title:tab.title || "",status:tab.status || "",generation:tabGeneration(tab.id)},
+    control:l?{id:l.id,owner:l.owner,agentName:l.agentName,state:l.state,expiresAt:l.expiresAt}:null,
+    blocked:!!blockedOwners.get(tab.id)?.has(owner),
+    running:[...runningControls.values()].filter(r=>r.tabId===tab.id).length};
+}
 let controlInstance=null,controlStoreTail=Promise.resolve();
 const controlReady=chrome.storage.session.get({dshControls:[],dshBlocked:[],dshRunning:[]}).then(saved=>{
   for(const l of saved.dshControls){l.state="stopping";l.reason="worker_restarted";tabControls.set(l.tabId,l);}
@@ -91,13 +103,16 @@ async function handleControl(sock,msg) {
   const incoming=msg.lease,tabId=incoming?.tabId;
   if(!Number.isInteger(tabId))return send(sock,{type:"controlAck",id:msg.id,ok:false,error:"INVALID_TAB"});
   try {
-    try {await chrome.tabs.get(tabId);}catch(error) {
+    let tab;
+    try {tab=await chrome.tabs.get(tabId);}catch(error) {
+      if(msg.action==="inspect")return send(sock,{type:"controlAck",id:msg.id,ok:true,snapshot:{tab:null,control:null,blocked:false,running:0}});
       if(msg.action!=="revoke")throw error;
       tabControls.delete(tabId);
       for(const [id,r] of runningControls)if(r.tabId===tabId)runningControls.delete(id);
       await persistControls();
       return send(sock,{type:"controlAck",id:msg.id,ok:true,drained:true});
     }
+    if(msg.action==="inspect")return send(sock,{type:"controlAck",id:msg.id,ok:true,snapshot:sessionSnapshot(tab,incoming.owner)});
     const existing=tabControls.get(tabId);
     if(msg.action==="revoke") {
       if(existing?.id===incoming.id)await revokeLocal(tabId,incoming.reason || "revoked");
@@ -106,12 +121,17 @@ async function handleControl(sock,msg) {
     }
     if(!["grant","renew"].includes(msg.action))throw new Error("INVALID_CONTROL_ACTION");
     if(blockedOwners.get(tabId)?.has(incoming.owner))throw new Error("CONTROL_STOPPED: 用户已终止该任务");
+    if(msg.action==="renew" && (!existing || existing.id!==incoming.id || existing.owner!==incoming.owner || existing.expiresAt<=Date.now()))
+      throw new Error("CONTROL_REVOKED: 扩展租约已失效，需要重新申请");
     if(existing && (existing.id!==incoming.id || existing.state==="stopping"))throw new Error("TAB_OCCUPIED: 旧任务尚未结束");
     if([...runningControls.values()].some(r=>r.tabId===tabId && r.leaseId!==incoming.id))throw new Error("CONTROL_STOPPING");
     controlInstance=msg.instanceId;
-    tabControls.set(tabId,{...incoming,state:"active"});
+    const installed={...incoming,state:"active"};
+    tabControls.set(tabId,installed);
     await persistControls();await updateControlUI(tabId);
-    send(sock,{type:"controlAck",id:msg.id,ok:true,drained:false});
+    if(tabControls.get(tabId)!==installed || installed.state!=="active" || blockedOwners.get(tabId)?.has(incoming.owner))
+      throw new Error("CONTROL_REVOKED: 同步期间控制权已变化");
+    send(sock,{type:"controlAck",id:msg.id,ok:true,drained:false,snapshot:sessionSnapshot(tab,incoming.owner)});
   } catch(error) {send(sock,{type:"controlAck",id:msg.id,ok:false,error:error.message});}
 }
 async function controlTick() {
