@@ -4,11 +4,15 @@
 
 MCP 使用 SDK + zod 从 manifest 生成 schema；DSH 使用已安装的 dsh-tools/schemastery 编译 schema；CLI 的 call 命令接受同样的 JSON。DSH 原生 schema 不支持的数字/数组边界由共用 validate 在执行前校验。
 
-添加工具时同时更新 manifest、bridge 路由及扩展动作，并加入语义测试。适配器无需重复手写工具注册。只有 status/tabs/request_status 声明 MCP readOnlyHint；页面读取也会建立控制会话。manifest.concurrencySafe 表示读操作可以重叠，真正的写串行保障位于 bridge。eval 永远按写操作处理。
+添加工具时同时更新 manifest、bridge 路由及扩展动作，并加入语义测试。适配器无需重复手写工具注册。
+
+MCP 仅为 browser_status、browser_tabs、browser_request_status、browser_session_status 声明 readOnlyHint。普通页面读取也会建立控制会话，因此不声明这一提示。
+
+manifest.concurrencySafe 表示读操作可以重叠，不表示没有会话副作用。真正的写串行保障位于 bridge；eval 永远按写操作处理。队列与租约的关系见 [架构说明](architecture.md)。
 
 BridgeClient 自启采用 single-flight；认证或服务身份失败不会误判成端口空闲；子进程退出指数退避，每 5 秒检查服务。三份适配器使用相同令牌、deadline、取消、只读重试策略。DSH/CLI 截图落地文件，MCP 返回图片内容块。
 
-CLI 完整调用：
+可直接执行的端到端示例见 [README](../README.md#第一个端到端调用)。需要传复杂 JSON 时，在项目根目录准备符合 tools.manifest.json 的 args.json 或 workflow.json，再调用：
 ```powershell
 node examples/cli.mjs call browser_extract --file args.json
 node examples/cli.mjs call browser_batch --file workflow.json

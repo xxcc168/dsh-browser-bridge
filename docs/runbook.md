@@ -32,6 +32,16 @@ MCP 宿主直接执行 `node <项目绝对路径>/examples/mcp-server.mjs`。不
 | DSH_AGENT_ID | 仅单任务专用进程可设置；多任务共享 MCP 应逐调用提供 agentId |
 | DSH_BRIDGE_ARTIFACT_DIR | DSH/CLI 截图目录，默认系统临时目录下 dsh-browser-bridge |
 
+### 高级配置
+
+| 环境变量 | 默认与用途 |
+|---|---|
+| DSH_BRIDGE_WAIT | bridge 等待扩展连接的毫秒数，默认 12000；仍受请求 deadline 约束 |
+| DSH_BRIDGE_TIMEOUT | bridge 等待扩展命令结果的毫秒数，默认 30000；wait 有额外响应余量，仍受请求 deadline 约束 |
+| DSH_AGENT_NAME | 未逐调用指定 agentName 时的任务显示名称；只影响提示，不是身份凭据 |
+
+bridge 的时间配置需使用正整数毫秒，修改后重启服务；不要为了等待未知写结果而无限延长超时。动作期限、wait 和控制保持的区别见 [协议说明](bridge-api.md#不同时间限制)。原生浏览器验收还支持仅用于测试的 DSH_BROWSER_BINARY，指定已安装 Chromium 的可执行文件；不会下载浏览器。
+
 端口或令牌改变时同步扩展弹窗配置。只监听本机，不开放公网。
 
 ## 更新和路径迁移
@@ -44,21 +54,27 @@ MCP 宿主直接执行 `node <项目绝对路径>/examples/mcp-server.mjs`。不
 
 移动源码后，尚未重载的旧扩展 worker 可能暂时继续保持连接；connected=true 不能证明 Chrome 已加载新路径。
 
-### 1.6.2 版本同步与五分钟保持
+### 运行版本核验与控制保持
 
-包、锁文件、工具 manifest、Chrome manifest 的版本统一为 1.6.2。运行时必须分别检查 adapterVersion、version、extension.version，不能仅看版本文件。当前对话中的 stdio MCP 在启动时加载代码，bridge 重启或扩展重载不会更新这个 MCP 进程；请在 Codex「设置 → MCP 服务器」重启唯一的 dsh_browser_bridge，或由用户在完成任务后重启 Codex。
-
-Codex 若再次出现 dsh_browser_bridge (Codex) 重复入口，先核对两条 args 是否都指向本项目，备份配置后仅保留直接 Node 的 dsh_browser_bridge。不要保存旧设置页面里的重复配置，也不要清理其他项目或其他 MCP 配置。
+包、锁文件、工具 manifest、Chrome manifest 的当前版本统一为 1.6.2。运行时必须分别检查 adapterVersion、version、extension.version，不能仅看版本文件。stdio MCP 在进程启动时加载代码；bridge 重启或扩展重载不会更新适配器进程，必须在所用宿主中重新启动 MCP 进程。
 
 controlPolicy 集中定义 leaseMs=300000、idleMs=300000、renewIntervalMs=20000。延长保持不会把每次工具请求改成五分钟，也不允许续租无限延长空闲占用或移交未结束的脚本。
 
-### 1.6.0 原生弹窗授权报错修复
+### Codex 宿主示例
 
-若点击启用出现 `Only permissions specified in the manifest may be requested`，这是 1.6.0 把 Chrome 禁止可选申请的 `debugger` 放入 `optional_permissions` 所致，不是用户点击错误。1.6.1 将其改为必需权限，不会代用户接受新的权限提示。
+在 Codex「设置 → MCP 服务器」重启唯一的 dsh_browser_bridge，或由用户在完成任务后重启 Codex。其他 MCP 宿主使用各自的进程重启方式；DSH 见 [DSH 接入](dsh-plugin.md)。
+
+若出现 dsh_browser_bridge (Codex) 重复入口，先核对两条 args 是否都指向本项目，备份配置后仅保留直接 Node 的 dsh_browser_bridge。不要保存旧设置页面里的重复配置，也不要清理其他项目或其他 MCP 配置。
+
+### 原生弹窗启用与权限故障
+
+若点击启用出现 `Only permissions specified in the manifest may be requested`，先检查是否仍运行旧扩展清单或代码。当前版本在清单中声明 debugger 必需权限，不使用可选权限申请；历史原因见 [CHANGELOG](../CHANGELOG.md#原生弹窗开发修订)。
 
 在 `chrome://extensions/` 对路径为本仓库 `extension/` 的 DSH Browser Bridge 点击“重新加载”，由用户检查并确认 Chrome 如有出现的权限提示，确认扩展版本为当前 1.6.2，再打开弹出页点击“启用原生弹窗识别”。默认开关仍为关闭；若运行清单/权限未更新，弹出页会禁用启用按钮并提示重新加载。
 
 `npm run test:native-browser` 使用不改写权限的原始 manifest，先通过真实 popup 点击验证启用，再验证原生空白 alert、confirm、prompt、beforeunload 与停止控制，避免测试临时添加 debugger 掩盖生产授权错误。
+
+版本沿革见 [CHANGELOG](../CHANGELOG.md)。日期命名的实施与验收记录保留历史验证边界，不代替上述当前运维步骤。
 
 ## 故障定位
 

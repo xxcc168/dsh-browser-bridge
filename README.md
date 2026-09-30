@@ -2,6 +2,14 @@
 
 统一维护 Chrome 扩展、本机 HTTP/WebSocket 服务和 MCP、DSH、CLI 入口。三个入口共用 lib/runtime.js，并从 tools.manifest.json 注册 27 个工具。
 
+## 阅读顺序
+
+- 首次使用：按本文启动服务、加载扩展，再运行下面的端到端示例。
+- 理解控制流与安全边界：[架构说明](docs/architecture.md)。
+- 配置、升级或排查连接：[运维说明](docs/runbook.md)；DSH 宿主另见 [DSH 接入](docs/dsh-plugin.md)。
+- 编排请求或维护适配器：[协议说明](docs/bridge-api.md)、[适配器维护](docs/adapters.md)，参数以 tools.manifest.json 为准。
+- 查询版本变化：[CHANGELOG](CHANGELOG.md)。历史实施与验收记录从其中链接进入，不作为当前操作步骤。
+
 ## 目录与启动
 
 ```text
@@ -17,28 +25,61 @@ dsh-browser-bridge/
   package.json            全项目依赖与命令入口
 ```
 
-本机项目位于 `D:\tools\dsh-browser-bridge`。在 Chrome 的 `chrome://extensions` 启用开发者模式，选择“加载已解压的扩展程序”，加载其 `extension` 子目录。迁移路径时先移除旧扩展，避免两个扩展交替连接同一服务。
+以克隆目录为项目根目录。在 Chrome 的 `chrome://extensions` 启用开发者模式，选择“加载已解压的扩展程序”，加载项目的 `extension` 子目录。迁移路径时先移除旧扩展，避免两个扩展交替连接同一服务。
 
 在项目根目录执行 `npm start` 可独立运行共享服务；MCP 默认也能按需自启。`npm run cli -- status` 查看状态，`npm run check` 和 `npm test` 执行检查。环境与故障处理见 [运维说明](docs/runbook.md)。
 
-本机已复用既有依赖，无需安装。新的 Git 克隆不包含 node_modules；迁移到新机器前需准备 Node 22+，并在允许安装依赖后执行 `npm ci`。扩展不需要构建；Git 克隆后可直接加载 extension。
+已有依赖可直接复用，不必重复安装。新的 Git 克隆不包含 node_modules；新机器需准备 Node 22+，并在允许安装依赖后执行 `npm ci`。扩展不需要构建；Git 克隆后可直接加载 extension。
 
-## 版本与升级
+## 第一个端到端调用
+
+先在项目根目录的一个终端运行 `npm start`，并加载扩展；在另一个 PowerShell 终端执行 `node examples/cli.mjs status`，确认 `connected=true`、`versionsMatch=true`。CLI 不会自动启动服务。
+
+以下示例只创建和操作本地 `/test` 页，不读取或修改业务页面。每次运行生成独立任务身份，同一轮的所有命令复用它：
+
+```powershell
+& {
+    $agentId = [guid]::NewGuid().ToString()
+
+    # 所有步骤复用同一身份；失败立即停止，不自动重放写操作。
+    function Invoke-BridgeExample {
+        param([string[]] $CliArguments)
+        $output = & node examples/cli.mjs @CliArguments "--agentId=$agentId"
+        if ($LASTEXITCODE -ne 0) { throw '调用失败：请检查错误和 requestId，停止后续步骤。' }
+        ($output -join "`n") | ConvertFrom-Json
+    }
+
+    $tab = Invoke-BridgeExample -CliArguments @('open', 'http://127.0.0.1:8765/test')
+    Invoke-BridgeExample -CliArguments @('wait', [string]$tab.id, '#box', '10000') | Out-Null
+    Invoke-BridgeExample -CliArguments @('type', [string]$tab.id, '#box', 'hello bridge') | Out-Null
+    Invoke-BridgeExample -CliArguments @('click', [string]$tab.id, '#btn') | Out-Null
+    $result = Invoke-BridgeExample -CliArguments @('extract', [string]$tab.id, '#result')
+    if ($result.items[0].text -ne 'clicked: hello bridge') { throw '测试页结果不符合预期，请保留页面核验。' }
+    $result.items[0].text
+
+    # 验证通过后，只关闭本轮创建的测试页；失败时保留现场。
+    Invoke-BridgeExample -CliArguments @('close', [string]$tab.id) | Out-Null
+}
+```
+
+预期输出 `clicked: hello bridge`。失败时不要重跑整段；若写请求为 `unknown`，先按原 `requestId` 查询结果并核验页面，见 [协议说明](docs/bridge-api.md#请求与错误)。
+
+## 当前版本与升级
 
 - 适配器、bridge 和扩展版本均为 1.6.2；协议版本 3，能力标识包含 `atomic-session-v1` 与 `native-dialog-v1`。运行时仍会分别报告实际加载版本，磁盘版本不代替运行版本核验。
 - 需要 Node 22+、Chrome 120+；继续使用现有依赖，不需要新增软件包。
-- 旧工具名称保留；默认读取预算、后台打开与严格点击定位发生变化。
+- 当前默认读取预算、后台打开与定位要求见“工具”和“输出和恢复”；版本变化见 [CHANGELOG](CHANGELOG.md)。
 - 修改磁盘源码不等于运行进程已升级。重启 bridge、重载扩展并重连 MCP 客户端；DSH 接入方式见 [DSH 接入](docs/dsh-plugin.md)。
 - 不具备所需能力的旧扩展/bridge 下，新适配器的 status/tabs 可诊断；对应能力的动作明确返回 UPGRADE_REQUIRED，避免以旧实现假装完成新行为。
 
 ## MCP 配置
 
-保留已有服务配置；示例路径应替换为本机现有位置：
+保留已有服务配置；将示例中的 `C:/path/to/dsh-browser-bridge` 替换为实际项目绝对路径。若宿主的 PATH 中没有 Node，将 command 改为 node.exe 的实际绝对路径：
 
 ```toml
 [mcp_servers.dsh_browser_bridge]
-command = 'C:\Program Files\nodejs\node.exe'
-args = ["D:\\tools\\dsh-browser-bridge\\examples\\mcp-server.mjs"]
+command = 'node'
+args = ["C:/path/to/dsh-browser-bridge/examples/mcp-server.mjs"]
 startup_timeout_sec = 15.0
 
 [mcp_servers.dsh_browser_bridge.env]
@@ -83,7 +124,7 @@ DSH_BRIDGE_URL 支持自定义本机端口；自启会使用此 URL 的端口。
 
 ## 原生空白弹窗
 
-Chrome 不支持将 `debugger` 声明为可选权限，1.6.0 的 `permissions.request` 会报 `Only permissions specified in the manifest may be requested`。1.6.1 改为在扩展加载/重新加载时声明必需权限，由用户在 Chrome 确认权限变更；插件不会调用可选权限申请或自动接受授权。参见 [Chrome 官方说明](https://developer.chrome.com/docs/extensions/reference/api/permissions#step_2_declare_optional_permissions_in_the_manifest)。
+扩展清单声明 `debugger` 必需权限，由用户在 Chrome 加载/重新加载扩展时检查并确认权限变更；插件不会调用可选权限申请或自动接受授权。
 
 权限获准后，在扩展弹出页点击“启用原生弹窗识别”。功能仍默认关闭，权限获准或重载本身不会自动启用；仅观测当前受控页面，Chrome 可能显示正在调试的提示条，不会自动确认 alert/confirm/prompt/beforeunload。若当前运行清单未更新或权限未获准，按钮禁用并提示重新加载，不再重复发起无效申请。
 
@@ -91,7 +132,7 @@ Chrome 不支持将 `debugger` 声明为可选权限，1.6.0 的 `permissions.re
 
 观测前已打开的弹窗没有可靠的打开事件补发保证。短时只读脚本探测未响应时只标记 `known=false / blocked=true`，返回 `PAGE_SCRIPT_BLOCKED`，提示用户人工核验，不伪造弹窗类型或空白正文。用户停止后，agent 不能调用恢复工具；用户可在浏览器原生弹窗或扩展弹出页手动处理。仍须等待实际旧脚本结束才能移交控制。
 
-细节与本次验证范围见 [实施说明](docs/2026-09-30-native-dialog-fix.md)。
+当前启用与故障处置见 [运维说明](docs/runbook.md#原生弹窗启用与权限故障)，历史修订和验证记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 输出和恢复
 
@@ -128,7 +169,7 @@ npm run cli -- tabs
 - 租约与空闲保持时间均为 5 分钟，常驻适配器每 20 秒续租；无执行中命令且 300 秒无页面活动后回收。策略集中在 tools.manifest.json.controlPolicy；单纯心跳或续租不延长空闲保持上限。
 - agent 崩溃或 CLI 进程退出后，没有续租则约 5 分钟回收；未结束的旧脚本仍等待扩展确认结束，不能因到期交给其他任务。CLI 连续命令通过相同任务标识恢复同一归属。
 
-1.6.2 对排队取消、停止时的申请阻塞、续租竞态和页面注入积压做了失败回归并修复：写队列最多 100 项且可即时移除未执行的取消项；续租单轮不重叠、跨任务并发最多 4；每个 document 的提示条仅保留一个未完成注入和最新状态。未添加依赖，也未放开写操作并发、用户停止或 unknown 隔离。详见 [审计与保持时间说明](docs/2026-09-30-agent-retention-and-audit.md)。
+- 写队列最多 100 项，未执行的取消项可即时移除。续租在共享 runtime 内单轮不重叠，跨任务最多 4 组并发，避免积压连接请求。页面提示条每个 document 只保留一个未完成注入和最新状态，避免重复注入，也不阻塞控制确认。控制流见 [架构说明](docs/architecture.md)。
 - “停止控制”先在扩展本地撤销，再通知 bridge 取消未执行命令；离线也记录停止状态。旧任务不能自动重新占用，用户可在提示条/弹窗点“允许旧任务”恢复其申请资格。
 - 已注入且未结束的脚本保留“停止中”，直至结束或确认旧 document 已被刷新替换；无法确认时不自动交给其他任务。停止不回滚已发生的点击、提交或网络副作用。
 - 停止状态在 Chrome storage.session 中保存，跨扩展 worker 重启恢复。浏览器整体退出不会保留控制会话。
