@@ -25,12 +25,12 @@ test("atomic first use: exactly one owner, competitors never wait for release",a
 test("idle time is not extended by transport renewals",async()=>{
   const e=setup(),l=e.controls.admit(1,A,"A");await l.ready;
   for(let i=0;i<5;i++){e.advance(20000);assert.equal((await e.controls.renew(A,[l.id])).length,1);}
-  e.advance(80001);e.controls.sweep();await l.stopping;
+  e.advance(200001);e.controls.sweep();await l.stopping;
   assert.equal(e.controls.leases.has(1),false);
 });
-test("crashed caller loses its 120s lease without waiting for idle deadline",async()=>{
+test("crashed caller loses its five-minute lease without permitting unresolved work handoff",async()=>{
   const e=setup(),l=e.controls.admit(1,A,"A");await l.ready;
-  e.advance(120001);e.controls.sweep();await l.stopping;
+  e.advance(300001);e.controls.sweep();await l.stopping;
   assert.equal(e.controls.leases.has(1),false);
   await e.controls.admit(1,B,"B").ready;
 });
@@ -78,7 +78,7 @@ test("extension expiry notification invalidates bridge control before the next a
 
 test("ensure resumes after a long idle only after drain and preserves manual-stop blocking",async()=>{
   const e=setup(),first=await e.controls.ensure(1,A,"A");
-  e.advance(180000);
+  e.advance(300000);
   const next=await e.controls.ensure(1,A,"A");
   assert.notEqual(next.id,first.id);assert.equal(next.state,"active");
   assert.ok(e.events.find(x=>x.id===first.id && x.action==="revoke"));
@@ -97,4 +97,35 @@ test("concurrent confirmations share one extension acknowledgement",async()=>{
   await Promise.resolve();assert.equal(renewals,1);
   confirm({drained:false});await Promise.all([first,second]);
   assert.equal(l.state,"active");
+});
+
+// Five minutes is an idle ceiling, not an indefinitely renewable ownership grant.
+test("default ownership survives four minutes and expires at five without heartbeat extension",async()=>{
+  const fixture=setup(),lease=fixture.controls.admit(101,A,"A");await lease.ready;
+  assert.equal(fixture.controls.public(lease).expiresAt-100000,300000);
+  fixture.advance(240000);fixture.controls.sweep();
+  assert.equal(fixture.controls.leases.get(101),lease);
+  await fixture.controls.renew(A,[lease.id]);
+  fixture.advance(59999);fixture.controls.sweep();
+  assert.equal(fixture.controls.leases.get(101),lease);
+  fixture.advance(1);fixture.controls.sweep();await lease.stopping;
+  assert.equal(fixture.controls.leases.has(101),false);
+});
+
+// Admission must not wait for a different owner's lost revoke acknowledgement.
+test("ensure rejects competitors and user-stopped owners before waiting for revoke",async()=>{
+  let finishRevoke;
+  const controls=new ControlManager({sync:async(_lease,action)=>action==="revoke"?
+    new Promise(resolve=>{finishRevoke=resolve;}):{drained:false}});
+  const lease=controls.admit(102,A,"A");await lease.ready;
+  void controls.revoke(lease,"user_stopped",true);
+  try {
+    for(const [owner,expected] of [[B,"TAB_OCCUPIED"],[A,"CONTROL_STOPPED"]]) {
+      const result=await Promise.race([
+        controls.ensure(102,owner,owner).then(()=>"unexpected_grant",error=>error.code),
+        new Promise(resolve=>setTimeout(()=>resolve("blocked_by_revoke"),60)),
+      ]);
+      assert.equal(result,expected);
+    }
+  }finally{finishRevoke({drained:false});await lease.stopping;}
 });

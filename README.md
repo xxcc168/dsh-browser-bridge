@@ -1,6 +1,6 @@
-# dsh-browser-bridge 1.5.0
+# dsh-browser-bridge 1.6.2
 
-统一维护 Chrome 扩展、本机 HTTP/WebSocket 服务和 MCP、DSH、CLI 入口。三个入口共用 lib/runtime.js，并从 tools.manifest.json 注册 25 个工具。
+统一维护 Chrome 扩展、本机 HTTP/WebSocket 服务和 MCP、DSH、CLI 入口。三个入口共用 lib/runtime.js，并从 tools.manifest.json 注册 27 个工具。
 
 ## 目录与启动
 
@@ -25,11 +25,11 @@ dsh-browser-bridge/
 
 ## 版本与升级
 
-- 适配器、bridge 和扩展版本均为 1.5.0；协议版本 3，能力标识为 `atomic-session-v1`。运行时仍会分别报告实际加载版本。
+- 适配器、bridge 和扩展版本均为 1.6.2；协议版本 3，能力标识包含 `atomic-session-v1` 与 `native-dialog-v1`。运行时仍会分别报告实际加载版本，磁盘版本不代替运行版本核验。
 - 需要 Node 22+、Chrome 120+；继续使用现有依赖，不需要新增软件包。
 - 旧工具名称保留；默认读取预算、后台打开与严格点击定位发生变化。
 - 修改磁盘源码不等于运行进程已升级。重启 bridge、重载扩展并重连 MCP 客户端；DSH 接入方式见 [DSH 接入](docs/dsh-plugin.md)。
-- 当前旧扩展/bridge 下，新适配器的 status/tabs 可诊断，其余动作返回 UPGRADE_REQUIRED，避免以旧实现假装完成新行为。
+- 不具备所需能力的旧扩展/bridge 下，新适配器的 status/tabs 可诊断；对应能力的动作明确返回 UPGRADE_REQUIRED，避免以旧实现假装完成新行为。
 
 ## MCP 配置
 
@@ -78,6 +78,20 @@ DSH_BRIDGE_URL 支持自定义本机端口；自启会使用此 URL 的端口。
 | `browser_session` | 获取、续期或释放标签页租约 | 串行写操作 |
 | `browser_session_status` | 原子查看连接、版本、标签页 generation、所有者、租约和读写能力 | 读取 |
 | `browser_ensure_session` | 经扩展确认后续租或重新获取当前任务的标签页控制 | 串行写操作 |
+| `browser_dialog` | 读取原生弹窗状态，包括空正文；不注入页面、不自动关闭 | 读取 |
+| `browser_handle_dialog` | 按最新 dialogId 显式确认/取消；不能绕过占用或用户停止 | 有占用与 ID 校验的窄恢复通道 |
+
+## 原生空白弹窗
+
+Chrome 不支持将 `debugger` 声明为可选权限，1.6.0 的 `permissions.request` 会报 `Only permissions specified in the manifest may be requested`。1.6.1 改为在扩展加载/重新加载时声明必需权限，由用户在 Chrome 确认权限变更；插件不会调用可选权限申请或自动接受授权。参见 [Chrome 官方说明](https://developer.chrome.com/docs/extensions/reference/api/permissions#step_2_declare_optional_permissions_in_the_manifest)。
+
+权限获准后，在扩展弹出页点击“启用原生弹窗识别”。功能仍默认关闭，权限获准或重载本身不会自动启用；仅观测当前受控页面，Chrome 可能显示正在调试的提示条，不会自动确认 alert/confirm/prompt/beforeunload。若当前运行清单未更新或权限未获准，按钮禁用并提示重新加载，不再重复发起无效申请。
+
+启用后，`browser_dialog` 和 `browser_session_status` 返回 `dialog.known / blocked / active`；空正文仍是实际弹窗，`active.blank=true`。已观测的弹窗会使 DOM 读取返回 `NATIVE_DIALOG_OPEN`，避免把旧结果误当新操作成功。处理弹窗需最新 `dialogId` 和明确的 `accept`，prompt 可传 `promptText`；关闭弹窗不代表原查询成功，不能重放 unknown 请求。
+
+观测前已打开的弹窗没有可靠的打开事件补发保证。短时只读脚本探测未响应时只标记 `known=false / blocked=true`，返回 `PAGE_SCRIPT_BLOCKED`，提示用户人工核验，不伪造弹窗类型或空白正文。用户停止后，agent 不能调用恢复工具；用户可在浏览器原生弹窗或扩展弹出页手动处理。仍须等待实际旧脚本结束才能移交控制。
+
+细节与本次验证范围见 [实施说明](docs/2026-09-30-native-dialog-fix.md)。
 
 ## 输出和恢复
 
@@ -90,18 +104,20 @@ DSH_BRIDGE_URL 支持自定义本机端口；自启会使用此 URL 的端口。
 - requestId 用于查询/去重；unknown 不能自动重放。记录保留约 5 分钟、最多 1000 项，服务重启清空；查不到记录不代表未执行。
 - `browser_session_status` 是返回时的已确认快照，`canWrite=true` 只表示该时刻控制权有效；实际动作仍会在队列和扩展派发前再次确认。`browser_ensure_session` 只恢复租约，不抢占其他任务、不绕过用户停止，也不重放 unknown 动作。
 - 默认 open 使用 active=false。截图和 activate 会影响焦点；hover/key 为合成事件，不承诺浏览器默认动作。
-- frameId/documentId、CSS 的 >>> open-shadow 穿透、text=/label=/placeholder=/role= 可用于明确定位。closed shadow、系统对话框、CDP 后端不在此版本范围。
+- frameId/documentId、CSS 的 >>> open-shadow 穿透、text=/label=/placeholder=/role= 可用于明确定位。仅增加原生 JavaScript 弹窗的窄 CDP 能力；closed shadow、文件选择、其他系统对话框和通用 CDP 后端仍不在此版本范围。
 
 ## 验证
 
 ```powershell
 npm run check
 npm test
+npm run test:native-browser
+npm run test:live-browser
 npm run cli -- status
 npm run cli -- tabs
 ```
 
-测试启动随机本机端口的隔离 bridge 和模拟扩展，不修改用户标签页。真实 Chrome 验收需在扩展重载后，使用 bridge 的 /test 页面完成输入、点击、提取、等待失败和截图检查。详见 docs/bridge-api.md 与 docs/dsh-plugin.md。
+普通测试启动随机本机端口的隔离 bridge 和模拟扩展，不修改用户标签页。native-browser 使用已安装 Chromium、原始 manifest 和隔离配置；live-browser 是显式发布验收，需没有其他受控任务并已手动启用原生观测。后者仅新建本地 /test 标签页和固定公开搜索，实际等待五分钟，结束关闭自身页面，报告与截图写入忽略的 .verify/。详见 docs/runbook.md 与 docs/bridge-api.md。
 
 ## 独占控制与手动终止
 
@@ -109,8 +125,10 @@ npm run cli -- tabs
 
 同一标签页只允许一个任务；其他任务立即收到 TAB_OCCUPIED，既不排队也不自动接管。status/tabs 可查看占用情况；read/extract/wait/frames 与写操作一样要求任务归属。服务端和扩展端都检查控制会话。
 
-- 租约 120 秒，常驻适配器每 20 秒续租；无执行中命令且 180 秒无页面活动后回收。单纯 WebSocket 心跳不延长空闲占用。
-- agent 崩溃或 CLI 进程退出后，没有续租则约 120 秒回收；CLI 连续命令通过相同任务标识恢复同一归属。
+- 租约与空闲保持时间均为 5 分钟，常驻适配器每 20 秒续租；无执行中命令且 300 秒无页面活动后回收。策略集中在 tools.manifest.json.controlPolicy；单纯心跳或续租不延长空闲保持上限。
+- agent 崩溃或 CLI 进程退出后，没有续租则约 5 分钟回收；未结束的旧脚本仍等待扩展确认结束，不能因到期交给其他任务。CLI 连续命令通过相同任务标识恢复同一归属。
+
+1.6.2 对排队取消、停止时的申请阻塞、续租竞态和页面注入积压做了失败回归并修复：写队列最多 100 项且可即时移除未执行的取消项；续租单轮不重叠、跨任务并发最多 4；每个 document 的提示条仅保留一个未完成注入和最新状态。未添加依赖，也未放开写操作并发、用户停止或 unknown 隔离。详见 [审计与保持时间说明](docs/2026-09-30-agent-retention-and-audit.md)。
 - “停止控制”先在扩展本地撤销，再通知 bridge 取消未执行命令；离线也记录停止状态。旧任务不能自动重新占用，用户可在提示条/弹窗点“允许旧任务”恢复其申请资格。
 - 已注入且未结束的脚本保留“停止中”，直至结束或确认旧 document 已被刷新替换；无法确认时不自动交给其他任务。停止不回滚已发生的点击、提交或网络副作用。
 - 停止状态在 Chrome storage.session 中保存，跨扩展 worker 重启恢复。浏览器整体退出不会保留控制会话。

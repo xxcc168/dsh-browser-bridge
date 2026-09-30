@@ -12,9 +12,13 @@
 | `npm run cli -- status` | 检查服务、扩展协议、连接和占用 |
 | `npm run check` | 所有源码语法检查、工具注册与目录完整性检查 |
 | `npm test` | 隔离端口运行行为与 MCP 集成测试，不操作用户页面 |
+| `npm run test:native-browser` | 用已安装 Chromium、临时配置与随机端口运行原生弹窗验收，不下载浏览器、不接入共享 8765 |
+| `npm run test:live-browser` | 发布前显式验收现有 Chrome/MCP：仅新建本地测试页，检查 27 个工具、真实弹窗、五分钟保持和固定公开搜索；截图/报告写入忽略的 .verify/ |
 | `npm run icons` | 用内置编码器生成 extension/icons 下的三个 PNG |
 
 MCP 宿主直接执行 `node <项目绝对路径>/examples/mcp-server.mjs`。不要通过 npm 向 stdio 注入命令日志。长期共享时可独立启动 bridge；若由某个适配器自启，该适配器退出可能停止其子服务。
+
+真实发布验收需先重载正确路径的扩展并手动启用原生观测，确保没有其他受控浏览器任务。`test:live-browser` 实际等待 300 秒，不加速时钟，不会自动开启观测或接受权限请求；只关闭自己创建的标签页，不停止共享服务。公开搜索仅发送固定测试词，不发送业务内容。失败时不要推送，检查 .verify/live-release-result.json；外网搜索不可用也会导致该完整验收失败。
 
 ## 配置
 
@@ -39,6 +43,22 @@ MCP 宿主直接执行 `node <项目绝对路径>/examples/mcp-server.mjs`。不
 5. 需要浏览器操作回归时，仅使用 http://127.0.0.1:8765/test 测试页，按 docs/bridge-api.md 验收。
 
 移动源码后，尚未重载的旧扩展 worker 可能暂时继续保持连接；connected=true 不能证明 Chrome 已加载新路径。
+
+### 1.6.2 版本同步与五分钟保持
+
+包、锁文件、工具 manifest、Chrome manifest 的版本统一为 1.6.2。运行时必须分别检查 adapterVersion、version、extension.version，不能仅看版本文件。当前对话中的 stdio MCP 在启动时加载代码，bridge 重启或扩展重载不会更新这个 MCP 进程；请在 Codex「设置 → MCP 服务器」重启唯一的 dsh_browser_bridge，或由用户在完成任务后重启 Codex。
+
+Codex 若再次出现 dsh_browser_bridge (Codex) 重复入口，先核对两条 args 是否都指向本项目，备份配置后仅保留直接 Node 的 dsh_browser_bridge。不要保存旧设置页面里的重复配置，也不要清理其他项目或其他 MCP 配置。
+
+controlPolicy 集中定义 leaseMs=300000、idleMs=300000、renewIntervalMs=20000。延长保持不会把每次工具请求改成五分钟，也不允许续租无限延长空闲占用或移交未结束的脚本。
+
+### 1.6.0 原生弹窗授权报错修复
+
+若点击启用出现 `Only permissions specified in the manifest may be requested`，这是 1.6.0 把 Chrome 禁止可选申请的 `debugger` 放入 `optional_permissions` 所致，不是用户点击错误。1.6.1 将其改为必需权限，不会代用户接受新的权限提示。
+
+在 `chrome://extensions/` 对路径为本仓库 `extension/` 的 DSH Browser Bridge 点击“重新加载”，由用户检查并确认 Chrome 如有出现的权限提示，确认扩展版本为当前 1.6.2，再打开弹出页点击“启用原生弹窗识别”。默认开关仍为关闭；若运行清单/权限未更新，弹出页会禁用启用按钮并提示重新加载。
+
+`npm run test:native-browser` 使用不改写权限的原始 manifest，先通过真实 popup 点击验证启用，再验证原生空白 alert、confirm、prompt、beforeunload 与停止控制，避免测试临时添加 debugger 掩盖生产授权错误。
 
 ## 故障定位
 

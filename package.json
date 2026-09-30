@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-bridge",
-  "version": "1.5.0",
+  "version": "1.6.2",
   "private": true,
   "description": "本机 Chrome 桥接：扩展、HTTP/WebSocket 服务、MCP、DSH 与 CLI 的统一项目",
   "type": "module",
@@ -27,7 +27,9 @@
     "mcp": "node examples/mcp-server.mjs",
     "cli": "node examples/cli.mjs",
     "check": "node scripts/check.mjs && node selfcheck.mjs",
-    "test": "node --test tests/behavior.test.mjs tests/control.test.mjs tests/extension-control.test.mjs tests/transport.test.mjs",
+    "test": "node --test tests/behavior.test.mjs tests/control.test.mjs tests/extension-control.test.mjs tests/native-dialog.test.mjs tests/popup.test.mjs tests/runtime.test.mjs tests/transport.test.mjs",
+    "test:native-browser": "node scripts/native-dialog-smoke.mjs",
+    "test:live-browser": "node scripts/live-browser-smoke.mjs",
     "icons": "node scripts/make-icons.cjs"
   },
   "license": "MIT",

@@ -1,8 +1,13 @@
 {
   "schemaVersion": 2,
   "package": "dsh-browser-bridge",
-  "version": "1.5.0",
+  "version": "1.6.2",
   "description": "统一工具 schema；协议 3，通过 atomic-session-v1 确认任务控制状态与租约。",
+  "controlPolicy": {
+    "leaseMs": 300000,
+    "idleMs": 300000,
+    "renewIntervalMs": 20000
+  },
   "transport": {
     "type": "http",
     "defaultPort": 8765,
@@ -19,10 +24,11 @@
   "constraints": [
     "页面首次操作原子获取任务级独占控制，其他 owner 立即拒绝，不进入队列。",
     "MCP/CLI 必须提供稳定任务 agentId 或宿主身份；DSH 使用 exec.agent。sessionId 不能替代 owner。",
-    "120 秒租约，20 秒客户端续租；无执行中操作且 180 秒无页面活动后回收。连接心跳不重置空闲期限。",
+    "300 秒租约，20 秒客户端续租；无执行中操作且 300 秒无页面活动后回收。连接心跳不重置空闲期限。",
     "手动停止撤销旧控制代次，旧任务被阻止自动重占；未知执行状态须等扩展确认结束。",
     "所有动作含 eval 都遵守占用；batch 不回滚已执行动作。",
-    "控制状态须经扩展确认；恢复只重建租约，绝不自动重放 unknown 页面动作。"
+    "控制状态须经扩展确认；恢复只重建租约，绝不自动重放 unknown 页面动作。",
+    "原生弹窗观测需用户在 Chrome 加载或重载扩展时确认 debugger 必需权限，再在扩展弹窗手动启用；不会自动确认。仅按 dialogId 显式处理当前弹窗可绕过被弹窗挂起的写队列，仍须有效占用。"
   ],
   "tools": [
     {
@@ -1333,6 +1339,49 @@
       "concurrencySafe": true,
       "sideEffects": "read",
       "timeoutMs": 60000
+    },
+    {
+      "name": "browser_dialog",
+      "title": "读取原生弹窗状态",
+      "description": "读取原生 alert/confirm/prompt/beforeunload 状态，包括空正文；不注入页面、不关闭弹窗。需用户在扩展弹窗启用观测；known=false 不表示没有弹窗。停止或占用时用 browser_session_status 查看阻塞摘要。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "标签页 id"},
+          "sessionId": {"type": "string", "description": "当前任务的有效控制会话 id"},
+          "agentId": {"type": "string", "description": "稳定任务身份；不能冒用其他任务"},
+          "agentName": {"type": "string", "description": "任务展示名称"}
+        },
+        "required": ["tabId"],
+        "additionalProperties": false
+      },
+      "action": "dialog",
+      "concurrencySafe": true,
+      "sideEffects": "read",
+      "timeoutMs": 10000
+    },
+    {
+      "name": "browser_handle_dialog",
+      "title": "显式处理当前原生弹窗",
+      "description": "仅按最新 dialogId 确认或取消原生弹窗；accept 必填，promptText 仅用于 prompt。可能触发页面后续业务逻辑，必须先确认用户意图，不自动处理或重放原请求。可解开被弹窗暂停的写队列，但不能绕过其他任务占用或用户停止；停止后由用户处理。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tabId": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "标签页 id"},
+          "dialogId": {"type": "string", "description": "状态返回的最新原生弹窗 id，不能为空且最多 128 字符"},
+          "accept": {"type": "boolean", "description": "明确选择确认 true 或取消 false"},
+          "promptText": {"type": "string", "description": "prompt 的显式回复，最多 2000 字符，不适用于其他弹窗"},
+          "sessionId": {"type": "string", "description": "当前任务的有效控制会话 id"},
+          "agentId": {"type": "string", "description": "稳定任务身份；不能冒用其他任务"},
+          "agentName": {"type": "string", "description": "任务展示名称"}
+        },
+        "required": ["tabId", "dialogId", "accept"],
+        "additionalProperties": false
+      },
+      "action": "dialoghandle",
+      "concurrencySafe": false,
+      "sideEffects": "write",
+      "timeoutMs": 10000
     },
     {
       "name": "browser_ensure_session",

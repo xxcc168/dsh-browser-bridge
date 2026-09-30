@@ -1,11 +1,13 @@
 "use strict";
 const {randomUUID}=require("node:crypto");
+const {controlPolicy}=require("../tools.manifest.json");
 const problem=(code,message)=>Object.assign(new Error(code+": "+message),{code,statusCode:409,definitive:true});
 
 // A synchronous admission decision precedes queue insertion. Extension acknowledgement
 // fences each lease; expiry never hands a tab to another owner before revocation drains.
 class ControlManager {
-  constructor({now=Date.now,sync,onRevoke=()=>{},leaseMs=120000,idleMs=180000}={}) {
+  // Bridge and adapter share a five-minute policy; transport heartbeats never reset page activity.
+  constructor({now=Date.now,sync,onRevoke=()=>{},leaseMs=controlPolicy.leaseMs,idleMs=controlPolicy.idleMs}={}) {
     this.now=now;this.sync=sync;this.onRevoke=onRevoke;this.leaseMs=leaseMs;this.idleMs=idleMs;
     this.leases=new Map();this.blocked=new Map();
   }
@@ -71,8 +73,11 @@ class ControlManager {
   }
   async ensure(tabId,owner,name) {
     this.assertOwner(owner);
+    // Manual stops and competitors must fail before a slow revoke acknowledgement can block admission.
+    if(this.blocked.get(tabId)?.has(owner))throw problem("CONTROL_STOPPED","用户已终止该任务；须由用户允许后重新申请");
     this.sweep();
     const previous=this.leases.get(tabId);
+    if(previous && previous.owner!==owner)throw problem("TAB_OCCUPIED","页面正在由 "+previous.name+" 占用");
     // Only a confirmed drain permits reuse. Manual stops remain owner-blocked.
     if(previous?.state==="stopping")await previous.stopping;
     let l=this.admit(tabId,owner,name);

@@ -93,7 +93,8 @@ test("force reconnect changes socket; stale close and replies cannot poison repl
   const context={WebSocket:Socket,chrome:{storage:{local:{get:async()=>({wsUrl:url})},session:{get:async defaults=>defaults,set:async()=>{}}},runtime:{getManifest:()=>({name:"test",version:"1.2.0"})}},
     console,setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){}};
   vm.createContext(context);
-  context.importScripts=()=>vm.runInContext(readFileSync(new URL("../extension/control.js",import.meta.url),"utf8"),context);
+  // Match the worker's imported control and native-dialog modules, without a browser dependency.
+  context.importScripts=(...paths)=>paths.forEach(path=>vm.runInContext(readFileSync(new URL("../extension/"+path,import.meta.url),"utf8"),context));
   vm.runInContext(source.slice(0,source.indexOf("chrome.alarms.create")),context);
   await context.connect();sockets[0].open();url="ws://new/ws";
   await context.connect(true);sockets[1].open();sockets[0].onclose();

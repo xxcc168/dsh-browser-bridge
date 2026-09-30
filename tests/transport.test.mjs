@@ -15,12 +15,14 @@ assert.ok(dir,"Set DSH_BROWSER_BRIDGE_DIR");
 const {WebSocket}=createRequire(dir+"/bridge.js")("ws");
 let child,socket,base,port;
 const calls=[],localControls=new Map(),running=new Map(),blocked=new Map();
+// Native fixture can hold the actual bridge FIFO until an explicit dialog recovery arrives.
+const nativeDialogs=new Map(),nativePaused=new Map();
 const A="owner-A-000000000000",B="owner-B-000000000000";
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function attach() {
   const sock=new WebSocket(base.replace("http:","ws:")+"/ws");
   await once(sock,"open");
-  sock.send(JSON.stringify({type:"hello",info:{version:"1.5.0",protocolVersion:3,capabilities:["atomic-session-v1"]},controls:[...localControls.values()],
+  sock.send(JSON.stringify({type:"hello",info:{version:manifest.version,protocolVersion:3,capabilities:["atomic-session-v1","native-dialog-v1"]},controls:[...localControls.values()],
     blocked:[...blocked].map(([tabId,owners])=>({tabId,owners:[...owners]}))}));
   sock.on("message",raw=>{
     const message=JSON.parse(raw);
@@ -28,7 +30,8 @@ async function attach() {
     if(message.type==="control") {
       const l=message.lease;
       const snapshot=()=>({tab:l.tabId===404?null:{id:l.tabId,url:"https://fixture.test/",title:"Fixture",generation:"fixture-generation-"+l.tabId},
-        control:localControls.get(l.tabId) || null,blocked:!!blocked.get(l.tabId)?.has(l.owner),running:running.has(l.tabId)?1:0});
+        control:localControls.get(l.tabId) || null,blocked:!!blocked.get(l.tabId)?.has(l.owner),running:running.has(l.tabId)?1:0,
+        dialog:{observation:"monitoring",known:true,active:nativeDialogs.get(l.tabId) || null}});
       if(message.action==="inspect") {
         sock.send(JSON.stringify({type:"controlAck",id:message.id,ok:true,snapshot:snapshot()}));return;
       }
@@ -49,9 +52,28 @@ async function attach() {
     }
     if(message.type!=="command")return;
     const c=message.command;calls.push(c);
+    if(c.action==="dialog") {
+      sock.send(JSON.stringify({type:"response",id:message.id,ok:true,data:{observation:"monitoring",known:true,active:nativeDialogs.get(c.tabId) || null}}));return;
+    }
+    if(c.action==="dialoghandle") {
+      if(nativeDialogs.get(c.tabId)?.id!==c.dialogId) {
+        sock.send(JSON.stringify({type:"response",id:message.id,ok:false,error:"STALE_DIALOG: replacement dialog"}));return;
+      }
+      nativeDialogs.delete(c.tabId);
+      sock.send(JSON.stringify({type:"response",id:message.id,ok:true,data:{handled:true,dialogId:c.dialogId}}));
+      const resume=nativePaused.get(c.tabId);nativePaused.delete(c.tabId);resume?.();return;
+    }
+    if(nativeDialogs.has(c.tabId) && c.action==="readPage") {
+      sock.send(JSON.stringify({type:"response",id:message.id,ok:false,error:"NATIVE_DIALOG_OPEN: alert with blank body"}));return;
+    }
     if(c.tabId!==undefined){
       const l=localControls.get(c.tabId);assert.equal(l?.id,message.leaseId);assert.equal(l?.owner,message.owner);
       running.set(c.tabId,message.leaseId);
+    }
+    if(c.selector==="#native-modal") {
+      nativeDialogs.set(c.tabId,{id:"native-dialog-"+c.tabId,type:"alert",message:"",blank:true});
+      nativePaused.set(c.tabId,()=>{running.delete(c.tabId);sock.send(JSON.stringify({type:"response",id:message.id,ok:true,data:{clicked:true}}));});
+      return;
     }
     let data={ok:true};
     if(c.action==="listTabs")data=[{id:1,title:"Fixture",url:"https://fixture.test/",active:false}];
@@ -157,7 +179,7 @@ test("MCP enforces task identity even when two agents share one connection",asyn
     assert.notEqual(a.isError,true);
     const status=await client.callTool({name:"browser_session_status",arguments:{tabId:17,agentId:"task-A"}});
     const observed=JSON.parse(status.content[0].text);
-    assert.equal(observed.canWrite,true);assert.equal(observed.versions.adapter,"1.5.0");
+    assert.equal(observed.canWrite,true);assert.equal(observed.versions.adapter,manifest.version);
     const ensured=await client.callTool({name:"browser_ensure_session",arguments:{tabId:17,agentId:"task-A"}});
     assert.equal(JSON.parse(ensured.content[0].text).sessionId,observed.sessionId);
     const b=await client.callTool({name:"browser_click",arguments:{tabId:17,selector:"#button",agentId:"task-B"}});
@@ -261,10 +283,58 @@ test("an old live bridge is diagnosed and receives no page commands",async()=>{
   try {
     const status=await client.run("browser_session_status",{tabId:1,agentId:"upgrade"});
     assert.equal(status.data.canWrite,false);assert.equal(status.data.reason,"UPGRADE_REQUIRED");
-    assert.equal(status.data.versions.bridge,"1.3.0");assert.equal(status.data.versions.adapter,"1.5.0");
+    assert.equal(status.data.versions.bridge,"1.3.0");assert.equal(status.data.versions.adapter,manifest.version);
     await assert.rejects(client.run("browser_click",{tabId:1,agentId:"upgrade",selector:"#never"}),/UPGRADE_REQUIRED/);
+    // Native feature probing must not grant or mutate a page on a legacy live service.
+    await assert.rejects(client.run("browser_dialog",{tabId:1,agentId:"upgrade"}),/UPGRADE_REQUIRED/);
+    await assert.rejects(client.run("browser_handle_dialog",{tabId:1,agentId:"upgrade",dialogId:"old-dialog",accept:true}),/UPGRADE_REQUIRED/);
     assert.equal(received.some(path=>path.includes("/api/tabs/")),false);
   }finally{client.close();await new Promise(resolve=>legacy.close(resolve));}
+});
+
+// Recovery must unblock, not queue behind, the paused action; normal writes remain FIFO.
+test("native recovery bypasses a modal-blocked FIFO without bypassing ownership or replaying writes",async()=>{
+  const first=api("/api/tabs/81/click",{selector:"#native-modal"});
+  for(let attempt=0;attempt<40 && !nativeDialogs.has(81);attempt++)await pause(5);
+  assert.ok(nativeDialogs.has(81));
+  const state=await api("/api/sessions",{action:"status",tabId:81});
+  assert.equal(state.data.pageBlocked,true);assert.equal(state.data.dialog.active.blank,true);
+  assert.equal(state.data.recovery.tool,"browser_handle_dialog");
+  const observed=await api("/api/tabs/81/dialog");assert.equal(observed.data.active.id,"native-dialog-81");
+  const blockedRead=await api("/api/tabs/81/content");
+  assert.equal(blockedRead.data.code,"NATIVE_DIALOG_OPEN");assert.equal(blockedRead.data.session.pageBlocked,true);
+  const other=await api("/api/tabs/81/dialoghandle",{dialogId:"native-dialog-81",accept:true},{"X-DSH-Owner":B});
+  assert.equal(other.data.code,"TAB_OCCUPIED");
+  const competitor=await api("/api/sessions",{action:"status",tabId:81},{"X-DSH-Owner":B});
+  assert.equal(competitor.data.dialog.active.message,undefined);
+  const stale=await api("/api/tabs/81/dialoghandle",{dialogId:"old-dialog",accept:true});
+  assert.equal(stale.data.code,"STALE_DIALOG");assert.ok(nativeDialogs.has(81));
+  const queued=api("/api/tabs/81/click",{selector:"#after-native"});await pause(10);
+  assert.equal(calls.some(command=>command.selector==="#after-native"),false);
+  const recovered=await api("/api/tabs/81/dialoghandle",{dialogId:"native-dialog-81",accept:true});
+  assert.equal(recovered.status,200);assert.equal((await first).status,200);assert.equal((await queued).status,200);
+  assert.equal(calls.filter(command=>command.selector==="#native-modal").length,1);
+  assert.equal(calls.filter(command=>command.selector==="#after-native").length,1);
+});
+
+// A cancelled queue entry must finish while a real modal is still holding the FIFO head.
+test("queued cancellation is acknowledged and removed before a native FIFO head resumes",async()=>{
+  const paused=api("/api/tabs/82/click",{selector:"#native-modal"});
+  for(let attempt=0;attempt<40 && !nativeDialogs.has(82);attempt++)await pause(5);
+  assert.ok(nativeDialogs.has(82));
+  const queued=api("/api/tabs/83/click",{selector:"#cancel-before-native-resume"},
+    {"X-DSH-Request-Id":"cancel-before-native-resume","X-DSH-Deadline":String(Date.now()+50)});
+  try {
+    const outcome=await Promise.race([queued,pause(150).then(()=>({status:"blocked_by_fifo"}))]);
+    assert.equal(outcome.status,499);
+    const record=await api("/api/requests/cancel-before-native-resume");
+    assert.equal(record.data.state,"cancelled");
+    assert.equal((await api("/api/status")).data.queuedWrites,1);
+    assert.equal(calls.some(command=>command.selector==="#cancel-before-native-resume"),false);
+  }finally {
+    await api("/api/tabs/82/dialoghandle",{dialogId:"native-dialog-82",accept:true});
+    await Promise.all([paused,queued]);
+  }
 });
 
 test("old extension and disconnected transport report non-writable diagnostic state",async()=>{

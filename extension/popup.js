@@ -1,6 +1,21 @@
 const $ = (id) => document.getElementById(id);
 
+async function dialogActivationState() {
+  // Chrome forbids optional debugger permission; loading the manifest and enabling observation are separate.
+  if(!chrome.runtime.getManifest().permissions?.includes("debugger"))
+    return {available:false,error:"当前运行清单缺少 debugger 必需权限，请在 chrome://extensions/ 重新加载 DSH Browser Bridge。"};
+  if(!await chrome.permissions.contains({permissions:["debugger"]}))
+    return {available:false,error:"Chrome 尚未授予 debugger 权限，请在扩展管理页确认权限并重新加载。"};
+  return {available:true,error:null};
+}
+
 async function refresh() {
+  // A permission grant alone never enables observation, including after an extension reload.
+  const config=await chrome.storage.local.get({dialogObservationEnabled:false});
+  const activation=await dialogActivationState(),enabled=activation.available && config.dialogObservationEnabled;
+  $("dialog-status").textContent=activation.error || (enabled?"原生弹窗识别已启用（仅观测受控页面，不自动确认）":"原生弹窗识别未启用，无法据此排除原生弹窗");
+  $("btn-dialogs").disabled=!activation.available || enabled;
+  $("btn-dialogs").textContent=!activation.available?"请先重新加载扩展":enabled?"原生弹窗识别已启用":"启用原生弹窗识别";
   try {
     const status = await chrome.runtime.sendMessage({ type: "dsb-get-status" });
     $("dot").className = "dot " + (status.connected ? "on" : "off");
@@ -46,6 +61,36 @@ async function refresh() {
       };
       li.appendChild(stop);
     }
+    // Native dialogs are not DOM elements; manual recovery remains available after task stop.
+    const native=controlState.nativeDialogs?.find(state=>state.tabId===t.id);
+    if(native?.blocked && !native.active) {
+      const warning=document.createElement("div");warning.className="control-status";
+      warning.textContent="页面脚本未响应，可能有观测前已打开的原生弹窗；请切到页面人工核验。";details.appendChild(warning);
+    }
+    if(native?.active) {
+      const dialog=native.active;
+      const warning=document.createElement("div");warning.className="control-status";
+      warning.textContent=(native.known?"原生 ":"观测已中断，待用户核验：")+dialog.type+" · "+(dialog.blank?"空正文":dialog.message.slice(0,120));
+      details.appendChild(warning);
+      if(dialog.type==="prompt") {
+        const hint=document.createElement("div");hint.className="control-status";
+        hint.textContent="请在原生弹窗输入回复；插件不代填、不自动确认。";details.appendChild(hint);
+      } else {
+        for(const accept of dialog.type==="alert"?[true]:[false,true]) {
+          const recover=document.createElement("button");recover.className="control-button";
+          recover.textContent=accept?(dialog.type==="beforeunload"?"确认离开页面":"确认弹窗"):"取消弹窗";
+          recover.disabled=!native.known;
+          recover.onclick=async event=>{
+            if(!event.isTrusted)return;
+            recover.disabled=true;
+            const result=await chrome.runtime.sendMessage({type:"dsb-handle-dialog",tabId:t.id,dialogId:dialog.id,accept});
+            if(!result.ok)$("dialog-status").textContent=result.error;
+            else await refresh();
+          };
+          details.appendChild(recover);
+        }
+      }
+    }
     li.prepend(details);
     const tag = document.createElement("span");
     tag.className = "tabid";
@@ -57,6 +102,18 @@ async function refresh() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  // Only the user's trusted click enables the feature; debugger is never requested as optional.
+  $("btn-dialogs").onclick=async event=>{
+    if(!event.isTrusted)return;
+    try {
+      const activation=await dialogActivationState();
+      if(!activation.available)throw new Error(activation.error);
+      $("btn-dialogs").disabled=true;
+      const result=await chrome.runtime.sendMessage({type:"dsb-enable-dialogs"});
+      if(!result.ok)throw new Error(result.error);
+      await refresh();
+    } catch(error) {await refresh();$("dialog-status").textContent="启用失败："+error.message;}
+  };
   $("btn-refresh").onclick = refresh;
   $("btn-save").onclick = async () => {
     const url = $("ws-url").value.trim() || "ws://127.0.0.1:8765/ws";

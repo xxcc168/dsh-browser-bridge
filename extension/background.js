@@ -1,5 +1,5 @@
 // DSH Browser Bridge, protocol 3. No page code or third-party runtime dependency.
-importScripts("control.js");
+importScripts("control.js","dialogs.js");
 const DEFAULT_WS_URL = "ws://127.0.0.1:8765/ws";
 let ws = null;
 let generation = 0;
@@ -53,9 +53,9 @@ async function connect(force = false) {
       lastPongAt = Date.now();
       reconnectAttempts = 0;
       setStatus(true, "已连接");
-      void controlReady.then(()=>send(sock,{type:"hello",...controlSnapshot(),info:{
+      void controlReady.then(()=>send(sock,{type:"hello",...controlSnapshot(),nativeDialogs:nativeDialogList(),info:{
         name:chrome.runtime.getManifest().name,version:chrome.runtime.getManifest().version,
-        protocolVersion:3,capabilities:["exclusive-control","user-stop","idle-release","deadline","frames","batch-actions","atomic-session-v1"],
+        protocolVersion:3,capabilities:["exclusive-control","user-stop","idle-release","deadline","frames","batch-actions","atomic-session-v1","native-dialog-v1"],
       }}));
       send(sock, {type:"ping",t:Date.now()});
       heartbeatTimer = setInterval(heartbeat, 15000);
@@ -130,8 +130,11 @@ async function handleMessage(sock, raw) {
 }
 
 function tabInfo(t) {
+  // Tab inventory exposes only blocker metadata, not potentially sensitive dialog text.
+  const state=nativeDialogSnapshot(t.id);
   return {id:t.id,windowId:t.windowId,index:t.index,title:t.title || "",url:t.url || "",
-    active:!!t.active,pinned:!!t.pinned,status:t.status || ""};
+    active:!!t.active,pinned:!!t.pinned,status:t.status || "",dialog:{observation:state.observation,known:state.known,blocked:state.blocked,
+      active:state.active?{type:state.active.type,blank:state.active.blank}:null}};
 }
 async function runCommand(cmd) {
   if (cmd.action === "ping") return {pong:Date.now()};
@@ -145,11 +148,16 @@ async function runCommand(cmd) {
     if (cmd.windowId !== undefined) options.windowId = cmd.windowId;
     const tab=await chrome.tabs.create(options);
     tabControls.set(tab.id,{id:cmd.provisionalId,tabId:tab.id,owner:cmd.owner,agentName:cmd.agentName || "Agent",
-    state:"active",expiresAt:Date.now()+120000});
-    await persistControls();await updateControlUI(tab.id);
+    // Use the bridge-issued expiry; the five-minute fallback is only for an older compatible bridge.
+    state:"active",expiresAt:cmd.leaseExpiresAt || Date.now()+300000});
+    await persistControls();
+    await ensureNativeDialogObserver(tab.id);await updateControlUI(tab.id);
     return tabInfo(tab);
   }
   const tabId = Number(cmd.tabId);
+  // Native status/recovery never injects into the paused page.
+  if(cmd.action==="dialog") {await nativeDialogReady;return {tabId,...nativeDialogSnapshot(tabId)};}
+  if(cmd.action==="dialoghandle")return handleNativeDialog(cmd);
   if (cmd.expectedUrl && ["navigate","close","activate","screenshot"].includes(cmd.action)) {
     if ((await chrome.tabs.get(tabId)).url !== cmd.expectedUrl) throw new Error("STALE_PAGE: URL 已变化");
   }
@@ -157,10 +165,13 @@ async function runCommand(cmd) {
   if (cmd.action === "navigate") return {...tabInfo(await chrome.tabs.update(tabId,{url:String(cmd.url)})),navigationRequested:true};
   if (cmd.action === "activate") {
     const tab = await chrome.tabs.get(tabId);
-    await chrome.tabs.update(tabId,{active:true}); await chrome.windows.update(tab.windowId,{focused:true});
-    return tabInfo(tab);
+    // Return the acknowledged update so agents never mistake successful activation for an inactive tab.
+    const activated = await chrome.tabs.update(tabId,{active:true});
+    await chrome.windows.update(tab.windowId,{focused:true});
+    return tabInfo(activated);
   }
   if (cmd.action === "frames") {
+    assertNativeDialogClear(tabId);
     const found = await chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>({url:location.href,title:document.title})});
     return {frames:found.map(r=>({frameId:r.frameId,documentId:r.documentId,...r.result}))};
   }
@@ -173,6 +184,7 @@ async function runCommand(cmd) {
     if (active[0]?.id !== tabId) throw new Error("FOCUS_CHANGED: 截图前活动标签已变化");
     return {tabId,url:tab.url,dataUrl:await chrome.tabs.captureVisibleTab(tab.windowId,{format:"png"})};
   }
+  assertNativeDialogClear(tabId);
   let target = cmd.documentId ? {tabId,documentIds:[cmd.documentId]} : {tabId,frameIds:[cmd.frameId ?? 0]};
   const probe=await chrome.scripting.executeScript({target,func:()=>true});
   const documentId=probe[0]?.documentId;
@@ -183,11 +195,13 @@ async function runCommand(cmd) {
   target={tabId,documentIds:[documentId]};
   await chrome.scripting.executeScript({target,func:info=>{
     const current=globalThis.__dshControlV3;
-    if(!current || current.leaseId!==info.leaseId)globalThis.__dshControlV3=info;
+    // Refresh a valid active lease even if its banner was delayed; never revive a stopped guard.
+    if(!current || current.leaseId!==info.leaseId || current.state==="active")globalThis.__dshControlV3=info;
   },args:[{
     leaseId:cmd.leaseId,state:"active",expiresAt:tabControls.get(tabId)?.expiresAt || 0,
   }]});
   ownsCommand({command:cmd,leaseId:cmd.leaseId,owner:cmd.owner});
+  assertNativeDialogClear(tabId);
   const evalMode = cmd.action === "evaluate";
   const injected = await chrome.scripting.executeScript({
     target,...(evalMode?{world:"MAIN"}:{}),
@@ -432,7 +446,9 @@ chrome.tabs.onUpdated.addListener((tabId,change)=>{
   if(change.status==="complete")void documentChanged(tabId);
 });
 chrome.tabs.onRemoved.addListener(tabId=>{
-  tabControls.delete(tabId);blockedOwners.delete(tabId);tabGenerations.delete(tabId);
+  // Closed tabs cannot keep a stale native modal or debugger target in session storage.
+  forgetNativeDialogs(tabId);
+  tabControls.delete(tabId);blockedOwners.delete(tabId);tabGenerations.delete(tabId);controlBannerJobs.delete(tabId);
   for(const [id,r] of runningControls)if(r.tabId===tabId)runningControls.delete(id);
   void persistControls();send(ws,{type:"tabClosed",tabId});
 });
@@ -441,7 +457,18 @@ chrome.runtime.onMessage.addListener((msg,sender,respond)=>{
   const fromPage=sender.id===chrome.runtime.id && sender.tab && sender.frameId===0;
   if(msg?.type==="dsb-control-list" && fromPopup) {
     void controlReady.then(()=>respond({controls:[...tabControls.values()].map(l=>({tabId:l.tabId,agentName:l.agentName,state:l.state,expiresAt:l.expiresAt})),
-      paused:[...blockedOwners.keys()]}));return true;
+      paused:[...blockedOwners.keys()],nativeDialogs:nativeDialogList()}));return true;
+  }
+  // These privileged paths are popup-only; Chrome grants debugger on load, not optional request.
+  if(msg?.type==="dsb-enable-dialogs" && fromPopup) {
+    void (async()=>{
+      if(!await chrome.permissions.contains({permissions:["debugger"]}))throw new Error("请在扩展管理页确认 debugger 权限并重新加载扩展");
+      await chrome.storage.local.set({dialogObservationEnabled:true});
+      await restoreNativeDialogObservers();respond({ok:true});
+    })().catch(error=>respond({ok:false,error:error.message}));return true;
+  }
+  if(msg?.type==="dsb-handle-dialog" && fromPopup) {
+    void handleNativeDialog(msg,true).then(result=>respond({ok:true,...result}),error=>respond({ok:false,error:error.message}));return true;
   }
   if(["dsb-stop-control","dsb-allow-control"].includes(msg?.type) && (fromPopup || fromPage)) {
     const tabId=fromPage?sender.tab.id:msg.tabId;
@@ -463,3 +490,5 @@ chrome.runtime.onMessage.addListener((msg,sender,respond)=>{
   }
 });
 void connect();
+// Restore observation without granting ownership or replaying an unresolved page operation.
+if(typeof restoreNativeDialogObservers==="function")void restoreNativeDialogObservers();

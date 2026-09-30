@@ -4,11 +4,12 @@
 
 ## 架构与事实源
 
-- tools.manifest.json：25 个工具的名称、JSON Schema、调度与动作映射。
+- tools.manifest.json：27 个工具的名称、JSON Schema、调度与动作映射。
 - lib/runtime.js：框架无关传输、进程生命周期、输出和搜索。
 - lib/index.js：DSH 注册；examples/mcp-server.mjs：MCP 注册；examples/cli.mjs：CLI。
 - bridge/bridge.js、bridge/control-manager.cjs：HTTP、WebSocket、FIFO、请求缓存、deadline、租约和 batch；bridge/package.json 仅定义 CommonJS 边界，依赖统一在根 package.json。
 - extension/background.js：Chrome 连接及实际 DOM 动作。
+- extension/dialogs.js：加载时声明 debugger 必需权限、手动启用后的原生 JavaScript 弹窗观测、显式处理和观测缺口状态；Chrome 不支持 optional debugger，不是通用 CDP 入口。
 
 ## 不变量
 
@@ -17,10 +18,12 @@
 - wait 不滚动，超时必须失败；输入/点击不得伪装成功。单次 click 不可触发两个 click。
 - structured DOM 动作用扩展注入，任意表达式 eval 仍受页面 CSP 约束。
 - 明确 tabId/frameId 与稳定任务身份。占用按 owner+tabId 维护，不得按共享进程或 tabId 自动继承其他任务的 session。
-- 页面首次使用强制独占；不同 owner 在入队前立即拒绝，不排队接管。租约 120 秒、空闲期限 180 秒，心跳不重置页面活动时间。
+- 页面首次使用强制独占；不同 owner 在入队前立即拒绝，不排队接管。租约和空闲期限均为 300 秒，由 tools.manifest.json.controlPolicy 统一供 bridge/适配器使用；心跳不重置页面活动时间。
 - 用户停止必须先在扩展本地撤销，取消队列且阻止旧 owner 自动重占。未结束脚本须等待结束/document 替换，不能仅到期就交接。
 - 页面提示放在 closed shadow 并从抓取中排除。控制按钮只接受真实用户事件；提供扩展弹窗替代入口。
 - deadline 包含排队；取消的未发送命令不可下发。已发送结果不明标记 unknown，不自动重放写操作。
+- 写队列保留 FIFO，只移除尚未执行的取消项；续租单轮不重叠、跨 owner 并发上限 4，旧代次续租回复不可覆盖新 claim。页面提示条每个 document 只保留一个注入和最新状态，不阻塞控制确认。
+- 原生弹窗不自动确认；dialoghandle 是解除被弹窗挂起的 FIFO 的窄例外，仍检查有效 owner/lease 和最新 dialogId，不能绕过用户停止。页面提示条注入不得阻塞控制确认；弹窗关闭不等于旧脚本结束。
 - 输出明确截断/续读，图片不作为 Base64 文本返回。DSH/CLI 保存文件，MCP image。
 - 只监听 localhost。不得用真实业务页面提交表单、删除或变更数据来做回归。
 
@@ -39,4 +42,4 @@ npm test
 
 默认从同仓库 bridge 解析服务路径，不得写死个人目录。配置/重载见 docs/runbook.md，DSH 接入见 docs/dsh-plugin.md，API 见 docs/bridge-api.md。
 
-缓存结果仅短期内存保存，不承诺业务恰好一次或重启后持久恢复。batch 失败停止但不回滚。高级 CDP、上传下载、closed shadow 和系统对话框不属于当前实现。
+缓存结果仅短期内存保存，不承诺业务恰好一次或重启后持久恢复。batch 失败停止但不回滚。只支持原生 alert/confirm/prompt/beforeunload 的窄 CDP 能力；通用 CDP、上传下载、closed shadow、文件选择和其他系统对话框不属于当前实现。观测前已有弹窗或探测超时必须保留 known=false，不伪造空白弹窗或无弹窗结论。

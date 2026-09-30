@@ -1,6 +1,6 @@
 # Bridge 协议 3
 
-适用于 bridge/扩展 1.5.0。HTTP 默认仅监听 127.0.0.1:8765。以下动作协议通过隔离 bridge + 模拟扩展验证；真实 Chrome 更新后还应运行本地 /test 验收。
+适用于 bridge/扩展 1.6.2。HTTP 默认仅监听 127.0.0.1:8765。以下动作协议通过隔离 bridge + 模拟扩展验证；真实 Chrome 更新后还应运行本地 /test 验收。
 
 ## 请求与错误
 
@@ -8,15 +8,17 @@
 
 页面动作及会话 API 必须带 X-DSH-Owner（稳定任务凭据，16–160 位字母数字或 _ . : -）；可带 URL 编码的 X-DSH-Agent-Name。status/tabs 无需 owner。请求结果查询校验原请求 owner。不是只检查 sessionId。
 
-所有动作都有端到端期限，默认 60 秒，上限 120 秒，包含排队和等待扩展。写队列最多 100 项；过期/取消的未发送任务不会发给扩展。已发送任务超时或断线可能已经生效，返回 state=unknown；不会自动重放。
+所有动作都有端到端期限，默认 60 秒，上限 120 秒，包含排队和等待扩展。5 分钟是页面控制保持时间，不是动作时限。写队列最多 100 项；过期/取消的尚未执行任务立即从队列移除并失败，不必等被弹窗暂停的 FIFO 队首恢复。已发送任务超时或断线可能已经生效，返回 state=unknown；不会自动重放。
 
-错误返回非 2xx 和 {error,code,state?,requestId?}。常见 code：WAIT_TIMEOUT、INPUT_FAILED、AMBIGUOUS_ELEMENT、INVALID_INDEX、TAB_LEASED、SESSION_EXPIRED、CANCELLED、COMMAND_TIMEOUT、EXTENSION_DISCONNECTED、UPGRADE_REQUIRED。
+错误返回非 2xx 和 {error,code,state?,requestId?}。常见 code：WAIT_TIMEOUT、INPUT_FAILED、AMBIGUOUS_ELEMENT、INVALID_INDEX、TAB_LEASED、SESSION_EXPIRED、CANCELLED、DEADLINE_EXCEEDED、COMMAND_TIMEOUT、EXTENSION_DISCONNECTED、UPGRADE_REQUIRED。
+
+适配器将 Node DOMException 的数字旧式错误码规范为 DEADLINE_EXCEEDED/CANCELLED 等字符串，保留原始 cause。客户端先超时、未收到桥接确认的写请求仍是 unknown，即使它可能还在队列中；必须按 requestId 查询。只有桥接确认 state=cancelled 才能判断该排队动作未执行，不通过更换 requestId 自动重放。
 
 相同 requestId 和相同请求返回原结果，不重复执行；参数不同返回 REQUEST_ID_CONFLICT。结果缓存约 5 分钟/1000 条；服务重启清空。成功对象响应带 requestId，数组仍为数组并通过响应头给出 id。
 
 ## 状态与标签页
 
-GET /api/status 返回 ok、version、protocolVersion、instanceId、connected、extension、capabilities、connectionGeneration、expectedExtensionVersion、lastHeartbeatAt、heartbeatAgeMs、reconnects、uptimeSec、pending、queuedWrites。connected 基于 socket 与心跳，不只是 readyState。
+GET /api/status 返回 ok、version、protocolVersion、instanceId、connected、extension、capabilities、connectionGeneration、expectedExtensionVersion、lastHeartbeatAt、heartbeatAgeMs、reconnects、uptimeSec、pending、queuedWrites，以及 controlPolicy（leaseMs=300000、idleMs=300000、renewIntervalMs=20000）。connected 基于 socket 与心跳，不只是 readyState。
 
 GET /api/tabs 返回数组，字段 id/windowId/index/title/url/active/pinned/status，默认没有 favicon。GET /api/tabs/active 返回最后聚焦窗口的活动标签页。
 
@@ -44,9 +46,17 @@ POST /api/tabs 接收 {url,active?,windowId?}，active 默认 false。DELETE /ap
 
 ## 流程与租约
 
+### 原生弹窗
+
+用户在 Chrome 加载/重新加载扩展时确认 `debugger` 必需权限，再在扩展弹出页手动启用观测后，仅受控标签页订阅 `Page.javascriptDialogOpening/Closed`。该权限不可作为 optional 权限请求；权限获准不等于观测启用。`GET /api/tabs/:id/dialog` 不注入页面，返回 `observation / reason / known / blocked / active`；active 含最新 id、type、message、blank、defaultPrompt、openedAt。文本有长度预算。known=false 表示未可靠观测，不等于没有弹窗。
+
+`POST /api/tabs/:id/dialoghandle` 接收 `{dialogId,accept,promptText?}`，accept 必须为布尔值，dialogId 非空且不超过 128 字符，promptText 仅用于 prompt 且最多 2000 字符。旧 ID 返回 STALE_DIALOG；已停止/其他任务无权处理。仅此恢复动作可以绕过被原生弹窗挂起的写队列，其他写操作继续 FIFO，仍经当前 owner/lease 确认。没有通用 CDP 命令入口。
+
+已知弹窗阻止 DOM 动作并返回 NATIVE_DIALOG_OPEN；关闭弹窗不会伪造原操作完成或清空 runningControls。未在观测前捕获的弹窗可能仅表现为只读探测未响应，返回 PAGE_SCRIPT_BLOCKED 与 known=false/blocked=true，须人工核验。没有权限、调试器占用或断开都返回明确原因。session status 即使在停止/冲突时也包含阻塞摘要；非有效所有者看不到消息/默认回复正文。canRead/canWrite 表示控制权，不保证页面未被原生弹窗阻塞，还须检查 pageBlocked。
+
 POST /api/tabs/:id/batch：{steps:[{action,...}],maxOutput?,timeout?}。HTTP 总时限由 X-DSH-Deadline 控制；适配器把 timeout 转为该头。最多 20 步，连续执行；失败返回 HTTP 422，含 failedStep、completedSteps、state、error、code。成功返回 steps；超输出预算的步骤结果使用 omitted 标记。动作不回滚。
 
-POST /api/sessions：action=acquire 时 tabId 必填；renew 接受 sessionId 或 sessionIds 数组；release 接受 sessionId。owner 必须匹配。租约固定 120 秒，续租不重置最后页面活动时间，180 秒空闲且无执行中动作则停止回收。正常动作可自动原子申请，无需 agent 每次手工 acquire。
+POST /api/sessions：action=acquire 时 tabId 必填；renew 接受 sessionId 或 sessionIds 数组；release 接受 sessionId。owner 必须匹配。租约固定 300 秒，续租不重置最后页面活动时间，300 秒空闲且无执行中动作则停止回收。正常动作可自动原子申请，无需 agent 每次手工 acquire。其他 owner 与已被用户停止的 owner 在等待 revoke 确认前立即拒绝；同一 owner 也必须等实际旧操作 drain，不能自动越过停止隔离。
 
 POST /api/sessions：action=status 返回经当前扩展确认的单次快照，包括 connected、版本、tabGeneration、controlGeneration、currentOwner、剩余租约、canRead、canWrite、reacquireAllowed 和 recovery。status 不续租。action=ensure 只在无其他有效所有者、无未结束脚本且未被用户停止时确认续租或重新获取；不抢占、不重放动作。
 

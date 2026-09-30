@@ -4,6 +4,8 @@ const http = require("node:http");
 const {randomUUID,createHash} = require("node:crypto");
 const {WebSocketServer} = require("ws");
 const {ControlManager}=require("./control-manager.cjs");
+const {WriteQueue}=require("./write-queue.cjs");
+const {controlPolicy}=require("../tools.manifest.json");
 const PORT = Number(process.env.DSH_BRIDGE_PORT || 8765);
 const HOST = "127.0.0.1";
 const VERSION = require("../package.json").version;
@@ -16,10 +18,10 @@ const pending=new Map(), records=new Map(), controlRequests=new Map();
 const controls=new ControlManager({sync:syncControl,onRevoke:(l,{closed=false}={})=>{
   for(const r of records.values())if(r.leaseId===l.id && ["queued","dispatched"].includes(r.state) && !(closed && r.action==="close"))r.controller?.abort();
 }});
-const WRITE_ACTIONS=new Set(["open","close","navigate","activate","click","type","key","scroll","check","select","hover","screenshot","evaluate","batch"]);
-const ACTIONS=new Set([...WRITE_ACTIONS,"readPage","extract","wait","frames","listTabs","getActive","ping"]);
-let extSocket=null,extInfo=null,lastPongAt=0,reconnects=0,queuedWrites=0,nextScreenshotAt=0,connectionGeneration=0;
-let writeTail=Promise.resolve();
+const WRITE_ACTIONS=new Set(["open","close","navigate","activate","click","type","key","scroll","check","select","hover","screenshot","evaluate","batch","dialoghandle"]);
+const ACTIONS=new Set([...WRITE_ACTIONS,"readPage","extract","wait","frames","listTabs","getActive","ping","dialog"]);
+let extSocket=null,extInfo=null,lastPongAt=0,reconnects=0,nextScreenshotAt=0,connectionGeneration=0;
+const writeQueue=new WriteQueue(100);
 const log=(...args)=>console.log(new Date().toISOString(),"[bridge]",...args);
 const error=(code,message,statusCode=400,definitive=true)=>Object.assign(new Error(code+": "+message),{code,statusCode,definitive});
 const disconnected=()=>error("EXTENSION_DISCONNECTED","扩展断开；已发送动作结果未知",503,false);
@@ -44,11 +46,8 @@ function syncControl(lease,action) {
   });
 }
 function enqueueWrite(task,ctx) {
-  if(queuedWrites>=100) return Promise.reject(error("QUEUE_FULL","写队列已满",429));
-  queuedWrites++;
-  const run=writeTail.then(async()=>{checkContext(ctx);return task();});
-  writeTail=run.catch(()=>{});
-  return run.finally(()=>queuedWrites--);
+  // Remove cancelled waits immediately without allowing writes to overtake the active FIFO head.
+  return writeQueue.enqueue(()=>{checkContext(ctx);return task();},ctx.signal);
 }
 function rejectPendingForSocket(sock) {
   for(const request of pending.values()) if(request.socket===sock) request.finish(disconnected());
@@ -160,11 +159,14 @@ async function sendCommand(action,params,ctx) {
       ctx.dispatched=true;if(ctx.record){ctx.record.state="dispatched";ctx.record.updatedAt=Date.now();}
       sock.send(JSON.stringify({type:"command",id,deadline:ctx.deadline,instanceId,
         leaseId:ctx.lease?.id,owner:ctx.owner,
-        command:{action,...params,...(action==="open"?{provisionalId:ctx.openLeaseId ||= randomUUID(),agentName:ctx.ownerName}:{})}}),err=>{if(err)finish(disconnected());});
+        command:{action,...params,...(action==="open"?{provisionalId:ctx.openLeaseId ||= randomUUID(),agentName:ctx.ownerName,
+          leaseExpiresAt:Date.now()+controls.leaseMs}:{})}}),err=>{if(err)finish(disconnected());});
     } catch {finish(disconnected());}
   });
 }
 function validateActionResult(action,data) {
+  // A recovery response without an explicit acknowledgement must not pretend it closed a modal.
+  if(action==="dialoghandle" && data?.handled!==true)throw error("DIALOG_HANDLE_FAILED","扩展未确认弹窗处理结果",502,false);
   if(action==="wait" && data?.found!==true) throw error("WAIT_TIMEOUT","元素条件未满足",408);
   if(action==="type" && data?.typed!==true) throw error("INPUT_FAILED","输入未生效",422);
   if(action==="evaluate" && data?.ok===false) throw error("EVALUATE_FAILED",data.error || "JS 执行失败",422);
@@ -207,9 +209,10 @@ async function batch(body,ctx) {
 }
 function statusJson() {
   return {ok:true,version:VERSION,protocolVersion:3,instanceId,connected:healthy(),extension:extInfo,
-    capabilities:["atomic-session-v1"],connectionGeneration,expectedExtensionVersion:EXTENSION_VERSION,
+    capabilities:["atomic-session-v1","native-dialog-v1"],connectionGeneration,expectedExtensionVersion:EXTENSION_VERSION,
     lastHeartbeatAt:lastPongAt || null,heartbeatAgeMs:lastPongAt?Date.now()-lastPongAt:null,reconnects,
-    uptimeSec:Math.round((Date.now()-startedAt)/1000),port:PORT,pending:pending.size,queuedWrites,controlledTabs:controls.leases.size};
+    uptimeSec:Math.round((Date.now()-startedAt)/1000),port:PORT,pending:pending.size,queuedWrites:writeQueue.size,controlledTabs:controls.leases.size,
+    controlPolicy:{...controlPolicy,leaseMs:controls.leaseMs,idleMs:controls.idleMs}};
 }
 function supportsSessions() {return healthy() && extInfo?.protocolVersion===3 && extInfo?.capabilities?.includes("atomic-session-v1");}
 function sessionView(tabId,owner,sessionId,confirmation) {
@@ -231,6 +234,10 @@ function sessionView(tabId,owner,sessionId,confirmation) {
   const action=valid?"use_session":!healthy()?"reconnect_extension":!supportsSessions()?"reload_extension":blocked?"user_allow_control":
     reason==="TAB_NOT_FOUND"?"list_tabs":occupied?"wait_for_owner":draining?"wait_for_drain":"ensure_session";
   const expiresAt=valid?Math.min(l.expiresAt,remote.expiresAt):current?.expiresAt || null;
+  // A stopped/competing task may see blocker metadata, never native prompt/message contents.
+  const native=verified?snapshot.dialog:null;
+  const dialog=native && !valid && native.active?{...native,active:{id:native.active.id,type:native.active.type,
+    blank:native.active.blank,openedAt:native.active.openedAt}}:native;
   return {tabId,connected:healthy(),verified,observedAt:now,instanceId,connectionGeneration,
     versions:{bridge:VERSION,extension:extInfo?.version || null,expectedExtension:EXTENSION_VERSION,
       extensionMatches:extInfo?.version===EXTENSION_VERSION},
@@ -240,8 +247,9 @@ function sessionView(tabId,owner,sessionId,confirmation) {
       agentName:current.agentName || current.name,isCurrentTask:currentOwner===owner}:null,
     sessionId:l?.owner===owner?l.id:null,state:valid?"active":reason,reason,
     expiresAt,remainingLeaseMs:expiresAt?Math.max(0,expiresAt-now):0,idleExpiresAt:l?l.lastActivity+controls.idleMs:null,
-    canRead:valid,canWrite:valid,capabilityScope:"tab_control",reacquireAllowed,
-    recovery:{action,tool:action==="ensure_session"?"browser_ensure_session":action==="list_tabs"?"browser_tabs":null,
+    canRead:valid,canWrite:valid,capabilityScope:"tab_control",reacquireAllowed,dialog,pageBlocked:!!(dialog?.active || dialog?.blocked),
+    recovery:{action:dialog?.active?(valid && dialog.known?"handle_native_dialog":"user_handle_native_dialog"):dialog?.blocked?"user_check_page_blocker":action,
+      tool:dialog?.active && valid && dialog.known?"browser_handle_dialog":dialog?.blocked?null:action==="ensure_session"?"browser_ensure_session":action==="list_tabs"?"browser_tabs":null,
       automaticRetryAllowed:false}};
 }
 function recoveryDetails(code,tabId,owner,state,requestId,confirmation) {
@@ -254,7 +262,7 @@ function recoveryDetails(code,tabId,owner,state,requestId,confirmation) {
 async function describeFailure(code,tabId,owner,state,requestId) {
   let confirmation;
   if(Number.isInteger(tabId) && owner && supportsSessions() &&
-    /^(CONTROL_|SESSION_|TAB_OCCUPIED|TAB_NOT_FOUND)/.test(code || "")) {
+    (/^(CONTROL_|SESSION_|TAB_OCCUPIED|TAB_NOT_FOUND|NATIVE_DIALOG_|DIALOG_|PAGE_SCRIPT_)/.test(code || "") || state==="unknown")) {
     try {confirmation=await syncControl({tabId,owner},"inspect");}catch{/* Unverified state stays explicitly non-writable. */}
   }
   return recoveryDetails(code,tabId,owner,state,requestId,confirmation);
@@ -327,7 +335,22 @@ button{margin-left:8px;background:#0d6efd;color:#fff;border:none;cursor:pointer}
 <input id="box" placeholder="在这里输入文字">
 <button id="btn">GO</button>
 <div id="result">（尚未点击）</div>
+<!-- Isolated native-modal fixtures never contact or modify any business system. -->
+<p><button id="blank-alert">空白 alert</button><button id="native-confirm">confirm</button><button id="native-prompt">prompt</button></p>
+<div id="native-result">（尚未触发原生弹窗）</div>
 <script>
+// Native fixtures preserve real Chrome blocking semantics, not simulated DOM modals.
+document.getElementById("blank-alert").onclick = function () {
+  alert("");document.getElementById("native-result").textContent = "alert closed";
+};
+document.getElementById("native-confirm").onclick = function () {
+  const answer = confirm("确认继续隔离测试？");
+  document.getElementById("native-result").textContent = answer ? "confirmed" : "cancelled";
+};
+document.getElementById("native-prompt").onclick = function () {
+  const answer = prompt("隔离测试回复", "");
+  document.getElementById("native-result").textContent = answer === null ? "cancelled" : "reply: " + answer;
+};
 document.getElementById("btn").onclick = function () {
   var v = document.getElementById("box").value;
   document.getElementById("result").textContent = v ? ("clicked: " + v) : "clicked: (空输入)";
@@ -366,7 +389,7 @@ const server=http.createServer(async(req,res)=>{
       if(m) {
         tabId=Number(m[1]);
         action=!m[2]&&req.method==="DELETE"?"close":({content:"readPage"})[m[2]] || m[2];
-        const getActions=["readPage","extract","screenshot","frames"];
+        const getActions=["readPage","extract","screenshot","frames","dialog"];
         if(action!=="close" && req.method!==(getActions.includes(action)?"GET":"POST")) action=null;
       }
     }
@@ -375,6 +398,12 @@ const server=http.createServer(async(req,res)=>{
     if(!body || typeof body!=="object" || Array.isArray(body)) throw error("INVALID_ARGUMENT","body 必须是对象");
     const params={...body,...Object.fromEntries(url.searchParams),...(tabId!==undefined?{tabId}:{})};
     delete params.action;
+    // Native recovery is narrow and explicit; no generic CDP command is exposed.
+    if(action==="dialoghandle" && (typeof params.accept!=="boolean" || typeof params.dialogId!=="string" || !params.dialogId || params.dialogId.length>128 ||
+      (params.promptText!==undefined && (typeof params.promptText!=="string" || params.promptText.length>2000))))
+      throw error("INVALID_ARGUMENT","dialogId、accept 必填；promptText 最多 2000 字符");
+    if(["dialog","dialoghandle"].includes(action) && !extInfo?.capabilities?.includes("native-dialog-v1"))
+      throw error("UPGRADE_REQUIRED","原生弹窗工具需要重载支持 native-dialog-v1 的扩展",409);
     for(const key of ["frameId","offset","limit","max","maxText","maxHtml","timeout","index","windowId"])
       if(params[key]!==undefined) params[key]=bounded(params[key],undefined,0,key==="windowId"||key==="frameId"?2147483647:10000000);
     const deadline=bounded(req.headers["x-dsh-deadline"],Date.now()+60000,1,Number.MAX_SAFE_INTEGER);
@@ -407,7 +436,8 @@ const server=http.createServer(async(req,res)=>{
       res.on("close",()=>{if(!res.writableEnded) controller.abort();});
       const timeout=setTimeout(()=>controller.abort(),Math.max(1,effectiveDeadline-Date.now()));
       const task=()=>action==="batch"?batch(params,ctx):perform(action,params,ctx);
-      record.promise=Promise.resolve(lease?.ready).then(()=>WRITE_ACTIONS.has(action)?enqueueWrite(task,ctx):task())
+      // A modal can suspend the FIFO head. Only its lease-bound, ID-checked explicit recovery bypasses it.
+      record.promise=Promise.resolve(lease?.ready).then(()=>WRITE_ACTIONS.has(action) && action!=="dialoghandle"?enqueueWrite(task,ctx):task())
         .then(result=>{
           record.result=result;
           record.state=result?.ok===false?(result.state || "failed"):"succeeded";

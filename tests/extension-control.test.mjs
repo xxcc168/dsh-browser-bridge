@@ -18,6 +18,49 @@ function setup(saved={}) {
     ready:()=>get("controlReady"),control:(action,lease)=>context.handleControl(context.ws,{id:"rpc",action,lease,instanceId:"bridge"})};
 }
 const lease={id:"lease-A",tabId:1,owner:"owner-A",agentName:"Task A",expiresAt:Date.now()+120000,state:"active"};
+
+// A paused banner should retain one injection plus the latest state, not one per renewal.
+test("banner updates coalesce a paused injection and eventually apply the stopped state",async()=>{
+  const fixture=setup();await fixture.ready();await fixture.control("grant",lease);
+  const injections=[];let finishInjection;
+  fixture.context.chrome.scripting.executeScript=options=>{
+    injections.push(options);
+    return injections.length===1?new Promise(resolve=>{finishInjection=resolve;}):Promise.resolve([]);
+  };
+  await fixture.context.updateControlUI(1);await fixture.context.updateControlUI(1);
+  await fixture.context.revokeLocal(1,"user_stopped",true);
+  const beforeResume=injections.length;
+  finishInjection([]);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(beforeResume,1);
+  assert.equal(injections.at(-1).args[0].state,"paused");
+  assert.equal(fixture.get("tabControls.has(1)"),false);
+});
+// A native alert pauses page injection, but extension-local stop must still acknowledge.
+test("blank native dialog cannot delay stop acknowledgement or drain idle control",async()=>{
+  const e=setup();await e.ready();await e.control("grant",lease);
+  e.context.chrome.scripting.executeScript=()=>new Promise(()=>{});
+  const result=await Promise.race([
+    e.context.revokeLocal(1,"user_stopped",true).then(()=>"stopped"),
+    new Promise(resolve=>setTimeout(()=>resolve("blocked_by_dialog"),60)),
+  ]);
+  assert.equal(result,"stopped");
+  assert.equal(e.get("tabControls.has(1)"),false);
+  assert.equal(e.messages.at(-1).type,"controlDrained");
+});
+// Stopping UI must not hide unresolved work or permit another task to take over.
+test("blank native dialog stop acknowledges without discarding in-flight work",async()=>{
+  const e=setup();await e.ready();await e.control("grant",lease);
+  e.get("runningControls.set('paused',{id:'paused',tabId:1,leaseId:'lease-A',documentId:'old'})");
+  e.context.chrome.scripting.executeScript=()=>new Promise(()=>{});
+  const result=await Promise.race([
+    e.context.revokeLocal(1,"user_stopped",true).then(()=>"stopped"),
+    new Promise(resolve=>setTimeout(()=>resolve("blocked_by_dialog"),60)),
+  ]);
+  assert.equal(result,"stopped");
+  assert.equal(e.get("tabControls.get(1).state"),"stopping");
+  assert.equal(e.get("runningControls.has('paused')"),true);
+  assert.equal(await e.context.finishControl(1,lease.id),false);
+});
 test("grant installs badge; competing/stale lease cannot replace active ownership",async()=>{
   const e=setup();await e.ready();await e.control("grant",lease);
   assert.equal(e.get("tabControls.get(1).id"),lease.id);assert.equal(e.ui.at(-1).text,"AI");

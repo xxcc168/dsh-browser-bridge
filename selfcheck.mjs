@@ -25,6 +25,8 @@ try {
   const pkg=JSON.parse(readFileSync(new URL("./package.json",import.meta.url),"utf8"));
   const lock=JSON.parse(readFileSync(new URL("./package-lock.json",import.meta.url),"utf8"));
   assert.equal(pkg.version,manifest.version);
+  // A single policy feeds both server and adapter; keep five-minute retention distinct from tool deadlines.
+  assert.deepEqual(manifest.controlPolicy,{leaseMs:300000,idleMs:300000,renewIntervalMs:20000});
   assert.equal(lock.version,pkg.version);assert.equal(lock.packages[""].version,pkg.version);
   assert.ok(pkg.files.includes("lib"));assert.ok(pkg.files.includes("tools.manifest.json"));
   for(const path of ["bridge","extension","examples"])assert.ok(pkg.files.includes(path));
@@ -41,6 +43,10 @@ try {
   assert.equal(require("ws/package.json").version,lock.packages["node_modules/ws"].version);
   assert.equal(require("./package.json").type,"commonjs");
   const extension=JSON.parse(readFileSync(new URL("./extension/manifest.json",import.meta.url),"utf8"));
+  // Chrome forbids optional debugger permission; the required declaration must stay version-aligned.
+  assert.equal(extension.version,pkg.version);
+  assert.ok(extension.permissions.includes("debugger"));
+  assert.ok(!extension.optional_permissions?.includes("debugger"));
   for(const path of [extension.background.service_worker,extension.action.default_popup,...Object.values(extension.icons)]) {
     assert.ok(existsSync(new URL("./extension/"+path,import.meta.url)),"Missing extension resource: "+path);
   }

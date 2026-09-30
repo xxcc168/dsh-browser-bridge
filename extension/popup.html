@@ -19,6 +19,11 @@
       <button id="btn-save">保存并重连</button>
       <button id="btn-refresh">刷新状态</button>
     </div>
+    <!-- Chrome grants the mandatory debugger permission on extension load; observation remains opt-in. -->
+    <div id="dialog-status" class="msg">原生弹窗识别尚未启用</div>
+    <div class="buttons">
+      <button id="btn-dialogs">启用原生弹窗识别</button>
+    </div>
     <div class="section-title">当前标签页（点击切换）</div>
     <ul id="tab-list"></ul>
     <div id="msg" class="msg"></div>

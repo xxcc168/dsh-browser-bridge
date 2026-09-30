@@ -1,6 +1,7 @@
 // Extension-owned control state. Never accept a stop/allow request from page JS.
 const tabControls=new Map(),runningControls=new Map(),blockedOwners=new Map();
 const tabGenerations=new Map();
+const controlBannerJobs=new Map();
 function tabGeneration(tabId) {
   if(!tabGenerations.has(tabId))tabGenerations.set(tabId,crypto.randomUUID());
   return tabGenerations.get(tabId);
@@ -10,7 +11,8 @@ function sessionSnapshot(tab,owner) {
   return {tab:{id:tab.id,url:tab.url || "",title:tab.title || "",status:tab.status || "",generation:tabGeneration(tab.id)},
     control:l?{id:l.id,owner:l.owner,agentName:l.agentName,state:l.state,expiresAt:l.expiresAt}:null,
     blocked:!!blockedOwners.get(tab.id)?.has(owner),
-    running:[...runningControls.values()].filter(r=>r.tabId===tab.id).length};
+    running:[...runningControls.values()].filter(r=>r.tabId===tab.id).length,
+    dialog:typeof nativeDialogSnapshot==="function"?nativeDialogSnapshot(tab.id):undefined};
 }
 let controlInstance=null,controlStoreTail=Promise.resolve();
 const controlReady=chrome.storage.session.get({dshControls:[],dshBlocked:[],dshRunning:[]}).then(saved=>{
@@ -36,17 +38,36 @@ function ownsCommand(msg) {
   if(!l || l.id!==msg.leaseId || l.owner!==msg.owner || l.state!=="active" || l.expiresAt<=Date.now())
     throw new Error("CONTROL_REVOKED: 当前任务没有有效页面控制权");
 }
+function scheduleControlBanner(tabId,info) {
+  const generation=tabGeneration(tabId),previous=controlBannerJobs.get(tabId);
+  if(previous?.generation===generation){previous.next=info;return;}
+  const job={generation,next:info};controlBannerJobs.set(tabId,job);
+  // At most one injection per current document is pending; renewals replace only its latest state.
+  void (async()=>{
+    while(job.next && controlBannerJobs.get(tabId)===job) {
+      const latest=job.next;job.next=null;
+      await chrome.scripting.executeScript({target:{tabId,allFrames:true},func:renderControl,args:[latest]}).catch(()=>{});
+    }
+  })().finally(()=>{if(controlBannerJobs.get(tabId)===job)controlBannerJobs.delete(tabId);});
+}
 async function updateControlUI(tabId) {
   const l=tabControls.get(tabId);
   const paused=blockedOwners.has(tabId);
   const state=l?.state || (paused?"paused":"free");
-  const badge=state==="active"?"AI":state==="stopping"?"…":paused?"停":"";
+  // Browser badges remain available when the native modal prevents a page banner refresh.
+  const native=typeof nativeDialogSnapshot==="function"?nativeDialogSnapshot(tabId):null;
+  const blocker=native?.active?(native.known?"原生 "+native.active.type+(native.active.blank?"（空正文）":""):"原生弹窗待核验"):
+    native?.blocked?"页面脚本阻塞，待核验":"";
+  const badge=state==="active"?(blocker?"阻":"AI"):state==="stopping"?"…":paused?"停":"";
   await chrome.action.setBadgeText({tabId,text:badge}).catch(()=>{});
   await chrome.action.setBadgeBackgroundColor({tabId,color:state==="active"?"#166534":"#b45309"}).catch(()=>{});
-  await chrome.action.setTitle({tabId,title:l?l.agentName+" · "+(state==="active"?"正在控制":"正在停止"):"DSH Browser Bridge"}).catch(()=>{});
+  await chrome.action.setTitle({tabId,title:l?l.agentName+" · "+(blocker || (state==="active"?"正在控制":"正在停止")):"DSH Browser Bridge"}).catch(()=>{});
   const info={leaseId:l?.id || "",state,agentName:l?.agentName || "",expiresAt:l?.expiresAt || 0,connected:ws?.readyState===WebSocket.OPEN};
   // The isolated-world guard reaches all injectable frames. The banner is top-frame only.
-  await chrome.scripting.executeScript({target:{tabId,allFrames:true},func:renderControl,args:[info]}).catch(()=>{});
+  // The page banner is best-effort: a native modal must not delay stop/grant acknowledgements.
+  const banner=controlBannerJobs.get(tabId);if(banner)banner.next=info;
+  if(typeof nativeDialogSnapshot!=="function" || (!nativeDialogSnapshot(tabId).active && !nativeDialogSnapshot(tabId).blocked))
+    scheduleControlBanner(tabId,info);
 }
 function renderControl(info) {
   globalThis.__dshControlV3=info;
@@ -86,6 +107,8 @@ async function finishControl(tabId,leaseId) {
   tabControls.delete(tabId);
   await persistControls();await updateControlUI(tabId);
   send(ws,{type:"controlDrained",tabId,leaseId});
+  // Detach only idle observers; an unresolved native modal remains explicitly observable.
+  if(typeof releaseNativeDialogObserver==="function")void releaseNativeDialogObserver(tabId);
   return true;
 }
 async function revokeLocal(tabId,reason="user_stopped",manual=false) {
@@ -128,7 +151,10 @@ async function handleControl(sock,msg) {
     controlInstance=msg.instanceId;
     const installed={...incoming,state:"active"};
     tabControls.set(tabId,installed);
-    await persistControls();await updateControlUI(tabId);
+    await persistControls();
+    // Observe before granting page commands, without depending on DOM injection.
+    if(typeof ensureNativeDialogObserver==="function")await ensureNativeDialogObserver(tabId);
+    await updateControlUI(tabId);
     if(tabControls.get(tabId)!==installed || installed.state!=="active" || blockedOwners.get(tabId)?.has(incoming.owner))
       throw new Error("CONTROL_REVOKED: 同步期间控制权已变化");
     send(sock,{type:"controlAck",id:msg.id,ok:true,drained:false,snapshot:sessionSnapshot(tab,incoming.owner)});
